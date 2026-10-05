@@ -1,0 +1,5 @@
+# macOS LightGBM requires OpenMP (brew install libomp).
+lightgbm==4.6.0
+arch==7.2.0
+# Install separately when resources permit; not required by the core workflow.
+neuralforecast==3.0.0
