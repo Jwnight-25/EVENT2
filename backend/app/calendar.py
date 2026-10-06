@@ -8,7 +8,7 @@ from .errors import DomainError
 
 @lru_cache
 def calendar():
-    return xcals.get_calendar("XSHG")
+    return xcals.get_calendar("XSHG", start="1991-01-01", end="2025-12-31")
 
 
 def is_open(db, day: str):
@@ -18,7 +18,9 @@ def is_open(db, day: str):
     cal = calendar()
     timestamp = pd.Timestamp(day)
     if timestamp < cal.first_session or timestamp > cal.last_session:
-        raise DomainError(f"交易日历未覆盖{day}，请上传包含日期及is_open的完整日历", "calendar_unavailable", 409)
+        raise DomainError(
+            f"交易日历未覆盖{day}，请上传包含日期及is_open的完整日历", "calendar_unavailable", 409
+        )
     return cal.is_session(timestamp)
 
 

@@ -12,10 +12,28 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from .config import API_PREFIX, MAX_UPLOAD
 from .db import get_db, engine, now
-from .entities import Stock, ImportBatch, Snapshot, Job, TrainingRun, Model, Prediction, AIAnalysis, BarCurrent, CalendarDay
+from .entities import (
+    Stock,
+    ImportBatch,
+    Snapshot,
+    Job,
+    TrainingRun,
+    Model,
+    Prediction,
+    AIAnalysis,
+    BarCurrent,
+    CalendarDay,
+)
 from .errors import DomainError, require
 from .market import preview, commit_import, current_bars, aggregate, create_snapshot, read_file
-from .schemas import StockRequest, CommitRequest, SnapshotRequest, TrainingRequest, PredictionRequest, PriceBasis
+from .schemas import (
+    StockRequest,
+    CommitRequest,
+    SnapshotRequest,
+    TrainingRequest,
+    PredictionRequest,
+    PriceBasis,
+)
 from .calendar import calendar, future_dates
 
 DB = Annotated[Session, Depends(get_db)]
@@ -32,12 +50,38 @@ async def lifespan(_):
 
 
 app = FastAPI(title="EVENT2 · 股票研究", version="0.3.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_methods=["GET", "POST"], allow_headers=["Content-Type", "Idempotency-Key"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Idempotency-Key"],
+)
 
 
 @app.middleware("http")
 async def request_id(request: Request, call_next):
     request.state.request_id = str(uuid4())
+    origin = request.headers.get("origin")
+    if (
+        request.method not in ("GET", "HEAD", "OPTIONS")
+        and origin
+        and origin
+        not in (
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+        )
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "code": "origin_rejected",
+                "message": "仅允许本机研究界面修改数据",
+                "details": None,
+                "request_id": request.state.request_id,
+            },
+        )
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     return response
@@ -45,27 +89,56 @@ async def request_id(request: Request, call_next):
 
 @app.exception_handler(DomainError)
 async def domain_error(request: Request, error: DomainError):
-    return JSONResponse(status_code=error.status, content={"code": error.code, "message": error.message, "details": error.details, "request_id": request.state.request_id})
+    return JSONResponse(
+        status_code=error.status,
+        content={
+            "code": error.code,
+            "message": error.message,
+            "details": error.details,
+            "request_id": request.state.request_id,
+        },
+    )
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, error):
-    return JSONResponse(status_code=422, content={"code": "validation_error", "message": "输入参数不合法", "details": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in error.errors()], "request_id": request.state.request_id})
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "validation_error",
+            "message": "输入参数不合法",
+            "details": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in error.errors()],
+            "request_id": request.state.request_id,
+        },
+    )
 
 
 @app.get(API_PREFIX + "/health")
 def health(db: DB):
     db.execute(select(func.count()).select_from(Stock))
     cal = calendar()
-    return {"status": "ok", "version": app.version, "database": engine.dialect.name, "market_timezone": "Asia/Shanghai", "calendar_start": str(cal.first_session.date()), "calendar_end": str(cal.last_session.date())}
+    return {
+        "status": "ok",
+        "version": app.version,
+        "database": engine.dialect.name,
+        "market_timezone": "Asia/Shanghai",
+        "calendar_start": str(cal.first_session.date()),
+        "calendar_end": str(cal.last_session.date()),
+    }
 
 
 @app.get(API_PREFIX + "/stocks")
 def stocks(db: DB):
     result = []
     for stock in db.scalars(select(Stock).order_by(Stock.code)):
-        latest = db.scalar(select(func.max(BarCurrent.time)).where(BarCurrent.stock_id == stock.id, BarCurrent.interval == "1d"))
-        intervals = list(db.scalars(select(BarCurrent.interval).where(BarCurrent.stock_id == stock.id).distinct()))
+        latest = db.scalar(
+            select(func.max(BarCurrent.time)).where(
+                BarCurrent.stock_id == stock.id, BarCurrent.interval == "1d"
+            )
+        )
+        intervals = list(
+            db.scalars(select(BarCurrent.interval).where(BarCurrent.stock_id == stock.id).distinct())
+        )
         result.append({**encode(stock), "data_cutoff": latest, "intervals": intervals})
     return result
 
@@ -83,15 +156,27 @@ def add_stock(body: StockRequest, db: DB):
 
 
 @app.post(API_PREFIX + "/imports/preview")
-async def import_preview(db: DB, file: UploadFile = File(), stock_id: str = Form(), interval: Literal["1d", "1m"] = Form("1d"), price_basis: PriceBasis = Form("raw"), volume_unit: Literal["shares", "lots"] = Form("shares"), mapping: str = Form("{}")):
+async def import_preview(
+    db: DB,
+    file: UploadFile = File(),
+    stock_id: str = Form(),
+    interval: Literal["1d", "1m"] = Form("1d"),
+    price_basis: PriceBasis = Form("raw"),
+    volume_unit: Literal["shares", "lots"] = Form("shares"),
+    mapping: str = Form("{}"),
+):
     content = await file.read(MAX_UPLOAD + 1)
     if len(content) > MAX_UPLOAD:
         raise DomainError("文件超过20MB")
     try:
         fields = json.loads(mapping)
-        if not isinstance(fields, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in fields.items()):
+        if not isinstance(fields, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in fields.items()
+        ):
             raise ValueError("映射必须为字符串键值对象")
-        batch = preview(db, stock_id, content, file.filename or "upload.csv", interval, price_basis, volume_unit, fields)
+        batch = preview(
+            db, stock_id, content, file.filename or "upload.csv", interval, price_basis, volume_unit, fields
+        )
     except (ValueError, KeyError, OSError) as exc:
         raise DomainError(f"无法解析文件或字段映射：{exc}")
     return encode(batch, ("rows",))
@@ -110,6 +195,7 @@ def import_detail(identifier: str, db: DB):
 @app.post(API_PREFIX + "/calendar/import")
 async def calendar_import(db: DB, file: UploadFile = File(), source: str = Form()):
     from datetime import date
+
     content = await file.read(MAX_UPLOAD + 1)
     if len(content) > MAX_UPLOAD:
         raise DomainError("文件超过20MB")
@@ -141,7 +227,15 @@ async def calendar_import(db: DB, file: UploadFile = File(), source: str = Form(
 
 
 @app.get(API_PREFIX + "/market/bars")
-def bars(db: DB, stock_id: str, interval: Literal["1m", "5m", "30m", "1h", "1d", "1mo"] = "1d", price_basis: PriceBasis = "raw", start: str | None = None, end: str | None = None, limit: int = Query(1000, ge=1, le=10000)):
+def bars(
+    db: DB,
+    stock_id: str,
+    interval: Literal["1m", "5m", "30m", "1h", "1d", "1mo"] = "1d",
+    price_basis: PriceBasis = "raw",
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = Query(1000, ge=1, le=10000),
+):
     require(db.get(Stock, stock_id))
     source_interval = "1d" if interval == "1mo" else "1m" if interval in ("5m", "30m", "1h") else interval
     rows = current_bars(db, stock_id, source_interval, price_basis, start, end)
@@ -150,8 +244,20 @@ def bars(db: DB, stock_id: str, interval: Literal["1m", "5m", "30m", "1h", "1d",
     if interval == "1mo" and rows:
         from datetime import datetime
         from zoneinfo import ZoneInfo
-        rows[-1]["incomplete"] = rows[-1]["time"][:7] == datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
-    return {"bars": rows[-limit:], "total": len(rows), "interval": interval, "price_basis": price_basis, "message": None if rows else "该周期和价格口径暂无数据", "aggregation": "session-start-v1；不跨午休；末尾保留不足周期" if source_interval == "1m" and source_interval != interval else None}
+
+        rows[-1]["incomplete"] = rows[-1]["time"][:7] == datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
+            "%Y-%m"
+        )
+    return {
+        "bars": rows[-limit:],
+        "total": len(rows),
+        "interval": interval,
+        "price_basis": price_basis,
+        "message": None if rows else "该周期和价格口径暂无数据",
+        "aggregation": "session-start-v1；不跨午休；末尾保留不足周期"
+        if source_interval == "1m" and source_interval != interval
+        else None,
+    }
 
 
 @app.post(API_PREFIX + "/snapshots", status_code=201)
@@ -164,7 +270,11 @@ def snapshot_create(body: SnapshotRequest, db: DB):
 
 def resolve_snapshot(db, body):
     require(db.get(Stock, body.stock_id))
-    snap = require(db.get(Snapshot, body.data_snapshot_id)) if body.data_snapshot_id else create_snapshot(db, body.stock_id, body.price_basis)
+    snap = (
+        require(db.get(Snapshot, body.data_snapshot_id))
+        if body.data_snapshot_id
+        else create_snapshot(db, body.stock_id, body.price_basis)
+    )
     if snap.stock_id != body.stock_id or snap.price_basis != body.price_basis:
         raise DomainError("快照与股票或价格口径不匹配", "snapshot_mismatch", 409)
     return snap
@@ -190,6 +300,25 @@ def training_create(body: TrainingRequest, db: DB, idempotency_key: str | None =
     snap = resolve_snapshot(db, body)
     if snap.bar_count < 220:
         raise DomainError("训练至少需要220条完整日线；长周期需要更多历史数据", "insufficient_data", 409)
+    for previous in db.scalars(
+        select(TrainingRun)
+        .join(Snapshot, TrainingRun.snapshot_id == Snapshot.id)
+        .where(TrainingRun.stock_id == body.stock_id, Snapshot.checksum == snap.checksum)
+    ):
+        previous_job = db.get(Job, previous.job_id)
+        if previous_job.status in ("queued", "running"):
+            raise DomainError("同一数据版本已有训练任务", "duplicate_training", 409)
+        tested = set(previous.report.get("test_started_horizons", [])) | {
+            h
+            for h, result in previous.report.get("horizons", {}).items()
+            if result.get("status") == "completed"
+        }
+        if tested.intersection(body.horizons):
+            raise DomainError(
+                "同一数据已完成该周期的最终测试，请追加新行情后重训，避免反复调参污染测试",
+                "test_already_used",
+                409,
+            )
     job = Job(kind="training", payload={"request": payload}, idempotency_key=idempotency_key)
     db.add(job)
     db.flush()
@@ -203,22 +332,48 @@ def training_create(body: TrainingRequest, db: DB, idempotency_key: str | None =
 
 @app.get(API_PREFIX + "/training-runs")
 def training_list(db: DB, stock_id: str, limit: int = Query(20, ge=1, le=100)):
-    return [encode(r) for r in db.scalars(select(TrainingRun).where(TrainingRun.stock_id == stock_id).order_by(TrainingRun.created_at.desc()).limit(limit))]
+    return [
+        encode(r)
+        for r in db.scalars(
+            select(TrainingRun)
+            .where(TrainingRun.stock_id == stock_id)
+            .order_by(TrainingRun.created_at.desc())
+            .limit(limit)
+        )
+    ]
 
 
 @app.get(API_PREFIX + "/training-runs/{identifier}")
 def training_detail(identifier: str, db: DB):
-    return encode(require(db.get(TrainingRun, identifier)))
+    from .entities import Trial
+
+    run = require(db.get(TrainingRun, identifier))
+    return {
+        **encode(run),
+        "trials": [
+            encode(t)
+            for t in db.scalars(select(Trial).where(Trial.run_id == run.id).order_by(Trial.created_at))
+        ],
+    }
 
 
 @app.get(API_PREFIX + "/models")
-def models(db: DB, stock_id: str, horizon: str | None = None, price_basis: PriceBasis = "raw", selected_only: bool = False):
+def models(
+    db: DB,
+    stock_id: str,
+    horizon: str | None = None,
+    price_basis: PriceBasis = "raw",
+    selected_only: bool = False,
+):
     query = select(Model).where(Model.stock_id == stock_id, Model.price_basis == price_basis)
     if horizon:
         query = query.where(Model.horizon == horizon)
     if selected_only:
         query = query.where(Model.selected.is_(True))
-    return [encode(m, ("artifact_path", "diagnostics")) for m in db.scalars(query.order_by(Model.created_at.desc()).limit(100))]
+    return [
+        encode(m, ("artifact_path", "diagnostics"))
+        for m in db.scalars(query.order_by(Model.created_at.desc()).limit(100))
+    ]
 
 
 @app.get(API_PREFIX + "/models/{identifier}/diagnostics")
@@ -236,17 +391,25 @@ def prediction_create(body: PredictionRequest, db: DB, idempotency_key: str | No
         raise DomainError("模型不能重复选择")
     snap = resolve_snapshot(db, body)
     from .research import STEPS
+
     future_dates(db, snap.cutoff, STEPS[body.horizon])
     for identifier in body.model_ids:
         model = require(db.get(Model, identifier), "模型不存在")
-        if not model.selected or model.stock_id != body.stock_id or model.horizon != body.horizon or model.price_basis != body.price_basis:
+        if (
+            not model.selected
+            or model.stock_id != body.stock_id
+            or model.horizon != body.horizon
+            or model.price_basis != body.price_basis
+        ):
             raise DomainError("模型未达标或与股票、周期、价格口径不匹配", "model_unavailable", 409)
         if snap.cutoff < db.get(Snapshot, model.snapshot_id).cutoff:
             raise DomainError("预测数据早于模型训练数据", "future_model", 409)
     job = Job(kind="prediction", payload={"request": payload}, idempotency_key=idempotency_key)
     db.add(job)
     db.flush()
-    prediction = Prediction(stock_id=body.stock_id, snapshot_id=snap.id, job_id=job.id, horizon=body.horizon, config=payload)
+    prediction = Prediction(
+        stock_id=body.stock_id, snapshot_id=snap.id, job_id=job.id, horizon=body.horizon, config=payload
+    )
     db.add(prediction)
     db.flush()
     job.result = {"prediction_id": prediction.id}
@@ -256,13 +419,26 @@ def prediction_create(body: PredictionRequest, db: DB, idempotency_key: str | No
 
 @app.get(API_PREFIX + "/predictions")
 def prediction_list(db: DB, stock_id: str, limit: int = Query(30, ge=1, le=100)):
-    return [encode(p) for p in db.scalars(select(Prediction).where(Prediction.stock_id == stock_id).order_by(Prediction.created_at.desc()).limit(limit))]
+    return [
+        encode(p)
+        for p in db.scalars(
+            select(Prediction)
+            .where(Prediction.stock_id == stock_id)
+            .order_by(Prediction.created_at.desc())
+            .limit(limit)
+        )
+    ]
 
 
 @app.get(API_PREFIX + "/predictions/{identifier}")
 def prediction_detail(identifier: str, db: DB):
     prediction = require(db.get(Prediction, identifier))
-    sources = [encode(a) for a in db.scalars(select(AIAnalysis).where(AIAnalysis.prediction_id == identifier).order_by(AIAnalysis.created_at))]
+    sources = [
+        encode(a)
+        for a in db.scalars(
+            select(AIAnalysis).where(AIAnalysis.prediction_id == identifier).order_by(AIAnalysis.created_at)
+        )
+    ]
     snap = db.get(Snapshot, prediction.snapshot_id)
     actual = current_bars(db, prediction.stock_id, "1d", snap.price_basis, snap.cutoff)
     return {**encode(prediction), "ai_analyses": sources, "actual_bars": actual[-300:]}
@@ -297,4 +473,9 @@ def job_cancel(identifier: str, db: DB):
 
 @app.get(API_PREFIX + "/integrations")
 def integrations():
-    return {"market_data": "not_configured", "ai": "configured" if os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured", "deep_models": "optional", "trading": "not_supported"}
+    return {
+        "market_data": "not_configured",
+        "ai": "configured" if os.getenv("AI_ANALYSIS_URL") else "not_configured",
+        "deep_models": "optional",
+        "trading": "not_supported",
+    }

@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Keep the user-requested modification log present in every code commit."""
+import subprocess
+import sys
+
+changed = subprocess.check_output(["git", "diff", "--cached", "--name-only", "-z"]).decode().split("\0")
+code = any(path.startswith(("backend/", "frontend/", "scripts/", ".github/", ".githooks/")) or path in ("compose.yaml", "pyproject.toml", "alembic.ini", "启动.command") for path in changed)
+if code and "修改记录.md" not in changed:
+    print("本次包含代码改动：请先更新并暂存‘修改记录.md’，再提交。", file=sys.stderr)
+    sys.exit(1)

@@ -11,3 +11,4 @@ frontend/*.tsbuildinfo
 playwright-report/
 .DS_Store
 *.log
+backups/

@@ -26,8 +26,12 @@ class SnapshotRequest(StrictRequest):
 
 class TrainingRequest(SnapshotRequest):
     data_snapshot_id: str | None = None
-    horizons: list[Horizon] = Field(default_factory=lambda: ["next_day", "one_month", "three_months"], min_length=1, max_length=3)
-    families: list[Literal["naive", "arima", "sarima", "ridge", "lightgbm", "garch", "nhits", "patchtst"]] = Field(default_factory=lambda: ["arima", "ridge"], min_length=1, max_length=8)
+    horizons: list[Horizon] = Field(
+        default_factory=lambda: ["next_day", "one_month", "three_months"], min_length=1, max_length=3
+    )
+    families: list[Literal["naive", "arima", "sarima", "ridge", "lightgbm", "garch", "nhits", "patchtst"]] = (
+        Field(default_factory=lambda: ["arima", "ridge"], min_length=1, max_length=8)
+    )
     max_trials: int = Field(default=8, ge=1, le=30)
     time_budget_seconds: int = Field(default=600, ge=10, le=3600)
     coverage: float = Field(default=0.9, ge=0.7, le=0.99)
