@@ -76,14 +76,15 @@ small {
   min-height: 100vh;
 }
 .sidebar {
-  width: 224px;
+  width: 244px;
   background: #173b30;
-  color: #c9d8cf;
+  color: #e4eee5;
   position: fixed;
   inset: 0 auto 0 0;
   display: flex;
   flex-direction: column;
-  padding: 33px 20px;
+  padding: 28px 18px 22px;
+  overflow-y: auto;
   z-index: 10;
 }
 .brand {
@@ -92,11 +93,12 @@ small {
   gap: 12px;
   color: #f8fbf5;
   text-decoration: none;
-  font-size: 25px;
-  font-weight: 650;
+  font-size: 23px;
+  font-weight: 600;
   letter-spacing: 1px;
 }
 .brand > span {
+  flex-shrink: 0;
   background: #d3e7a2;
   color: #173b30;
   width: 40px;
@@ -110,67 +112,89 @@ small {
 }
 .brand small {
   display: block;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
-  letter-spacing: 2px;
-  color: #a4b9ad;
+  letter-spacing: 1px;
+  color: #b7cec0;
   margin-top: 4px;
 }
 .nav-label {
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: #87a092;
-  margin: 52px 12px 16px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #b7cec0;
+  margin: 36px 12px 12px;
 }
-nav {
+.sidebar-nav {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-nav button {
+.sidebar-nav button {
   display: flex;
   align-items: center;
   gap: 13px;
-  color: #bbcec2;
+  color: #e4eee5;
   background: transparent;
-  padding: 15px 14px;
-  border-radius: 9px;
+  min-height: 50px;
+  padding: 12px;
+  border-radius: 10px;
   text-align: left;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease;
 }
-nav button.active {
+.sidebar-nav button svg,
+.calendar-button svg,
+.sidebar-mode svg,
+.sidebar-bottom svg {
+  flex-shrink: 0;
+}
+.sidebar-nav button:hover {
+  background: #254c3e;
+}
+.sidebar-nav button.active {
   background: #d9eab1;
-  color: #1d4031;
-  font-weight: 600;
+  color: #173b30;
+  font-weight: 500;
 }
 .nav-dot {
   margin-left: auto;
-  width: 6px;
-  height: 6px;
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: #47734f;
+  background: currentColor;
+}
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 32px;
 }
 .sidebar-note {
-  margin-top: auto;
-  border: 1px solid #35574a;
-  border-radius: 10px;
-  padding: 16px;
-  font-size: 12px;
+  padding: 16px 12px 0;
+  color: #b7cec0;
+  font-size: 11px;
+}
+.sidebar-mode {
+  display: flex;
+  align-items: center;
+  gap: 7px;
 }
 .sidebar-note p {
-  color: #9fb5a7;
+  color: #b7cec0;
   font-size: 11px;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .sidebar-bottom {
-  margin-top: 25px;
-  font-size: 10px;
+  margin-top: 20px;
+  padding: 0 12px;
+  font-size: 11px;
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #8faa99;
+  color: #b7cec0;
 }
 .workspace {
-  margin-left: 224px;
+  margin-left: 244px;
   min-width: 0;
   flex: 1;
 }
@@ -763,11 +787,11 @@ progress {
 }
 @media (max-width: 1100px) {
   .sidebar {
-    width: 190px;
+    width: 210px;
     padding: 28px 15px;
   }
   .workspace {
-    margin-left: 190px;
+    margin-left: 210px;
   }
   main {
     padding: 28px 25px;
@@ -791,7 +815,7 @@ progress {
 @media (max-width: 760px) {
   .sidebar {
     width: 66px;
-    padding: 25px 10px;
+    padding: 25px 11px;
   }
   .brand > div,
   .nav-label,
@@ -802,15 +826,23 @@ progress {
   .brand > span {
     width: 40px;
   }
+  .brand {
+    justify-content: center;
+  }
   .workspace {
     margin-left: 66px;
   }
-  nav {
+  .sidebar-nav {
     margin-top: 35px;
   }
-  nav button {
-    font-size: 0;
-    padding: 13px;
+  .sidebar-nav button {
+    justify-content: center;
+    gap: 0;
+    min-height: 48px;
+    padding: 12px 0;
+  }
+  .sidebar .nav-text {
+    display: none;
   }
   .nav-dot {
     display: none;
@@ -884,12 +916,20 @@ progress {
 }
 
 .calendar-button {
-  background: #284c3d;
-  color: #baccb6;
-  border-radius: 6px;
-  padding: 10px;
-  margin-top: 15px;
-  font-size: 11px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-height: 54px;
+  background: transparent;
+  color: #e4eee5;
+  border-top: 1px solid #39614e;
+  padding: 17px 12px 13px;
+  text-align: left;
+  font-size: 12px;
+}
+.calendar-button:hover {
+  background: #254c3e;
 }
 pre {
   font-size: 11px;
@@ -900,7 +940,8 @@ pre {
 }
 @media (max-width: 760px) {
   .calendar-button {
-    font-size: 9px;
-    padding: 8px 2px;
+    justify-content: center;
+    gap: 0;
+    padding: 16px 0;
   }
 }

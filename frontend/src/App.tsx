@@ -2,8 +2,10 @@ import { useState } from "react";
 import {
   Activity,
   ChartCandlestick,
-  FlaskConical,
-  Telescope,
+  BrainCircuit,
+  ChartLine,
+  CalendarDays,
+  Monitor,
   Plus,
   CircleHelp,
   ChevronDown,
@@ -31,10 +33,15 @@ export default function App() {
   const stock = stocks?.find((s) => s.id === stockId) || stocks?.[0];
   return (
     <div className="app">
-      <aside className="sidebar">
-        <a className="brand" href="#" onClick={(e) => e.preventDefault()}>
+      <aside className="sidebar" aria-label="研究工作台侧栏">
+        <a
+          className="brand"
+          href="#"
+          aria-label="EVENT2 股票研究工作台"
+          onClick={(e) => e.preventDefault()}
+        >
           <span>
-            <Activity size={24} />
+            <Activity size={22} aria-hidden="true" />
           </span>
           <div>
             EVENT<span className="brand-two">2</span>
@@ -42,43 +49,52 @@ export default function App() {
           </div>
         </a>
         <div className="nav-label">研究空间</div>
-        <nav>
+        <nav className="sidebar-nav" aria-label="研究页面">
           {[
             ["market", "行情研究", ChartCandlestick],
-            ["training", "模型训练", FlaskConical],
-            ["prediction", "预测分析", Telescope],
+            ["training", "模型训练", BrainCircuit],
+            ["prediction", "预测分析", ChartLine],
           ].map(([id, label, Icon]) => {
             const Glyph = Icon as typeof Activity;
             return (
               <button
                 key={String(id)}
+                type="button"
                 className={page === id ? "active" : ""}
+                aria-label={String(label)}
+                aria-current={page === id ? "page" : undefined}
+                title={String(label)}
                 onClick={() => setPage(String(id))}
               >
-                <Glyph size={19} />
-                {String(label)}
-                {page === id && <span className="nav-dot" />}
+                <Glyph size={22} strokeWidth={1.8} aria-hidden="true" />
+                <span className="nav-text">{String(label)}</span>
+                {page === id && <span className="nav-dot" aria-hidden="true" />}
               </button>
             );
           })}
         </nav>
-        <div className="sidebar-note">
-          <span className="live-dot" /> 本机研究模式
-          <p>
-            手动导入 · 按需分析
-            <br />
-            数据留在你的电脑
-          </p>
-        </div>
-        <button
-          className="calendar-button"
-          onClick={() => setCalendarOpen(true)}
-        >
-          导入交易日历
-        </button>
-        <div className="sidebar-bottom">
-          <CircleHelp size={16} />
-          <span>个人研究辅助 · 不执行交易</span>
+        <div className="sidebar-footer">
+          <button
+            type="button"
+            className="calendar-button"
+            aria-label="导入交易日历"
+            title="导入交易日历"
+            aria-haspopup="dialog"
+            onClick={() => setCalendarOpen(true)}
+          >
+            <CalendarDays size={18} strokeWidth={1.8} aria-hidden="true" />
+            <span className="nav-text">导入交易日历</span>
+          </button>
+          <div className="sidebar-note">
+            <div className="sidebar-mode">
+              <Monitor size={14} aria-hidden="true" /> 本机研究模式
+            </div>
+            <p>手动导入 · 按需分析</p>
+          </div>
+          <div className="sidebar-bottom">
+            <CircleHelp size={14} aria-hidden="true" />
+            <span>个人研究辅助 · 不执行交易</span>
+          </div>
         </div>
       </aside>
       <div className="workspace">
