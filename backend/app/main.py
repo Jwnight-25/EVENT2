@@ -313,9 +313,9 @@ def training_create(body: TrainingRequest, db: DB, idempotency_key: str | None =
             for h, result in previous.report.get("horizons", {}).items()
             if result.get("status") == "completed"
         }
-        if tested.intersection(body.horizons):
+        if body.evaluation_mode == "holdout" and tested.intersection(body.horizons):
             raise DomainError(
-                "同一数据已完成该周期的最终测试，请追加新行情后重训，避免反复调参污染测试",
+                "此数据的评估区段已经使用；可切换研究模式反复调参，但不能再次声称独立测试",
                 "test_already_used",
                 409,
             )
@@ -364,16 +364,38 @@ def models(
     horizon: str | None = None,
     price_basis: PriceBasis = "raw",
     selected_only: bool = False,
+    run_id: str | None = None,
 ):
     query = select(Model).where(Model.stock_id == stock_id, Model.price_basis == price_basis)
     if horizon:
         query = query.where(Model.horizon == horizon)
     if selected_only:
         query = query.where(Model.selected.is_(True))
-    return [
-        encode(m, ("artifact_path", "diagnostics"))
-        for m in db.scalars(query.order_by(Model.created_at.desc()).limit(100))
-    ]
+    if run_id:
+        query = query.where(Model.run_id == run_id)
+    records = list(db.scalars(query.order_by(Model.created_at.desc()).limit(100)))
+    from .assessment import assess_models, CHECK_LABELS
+    from .market import load_snapshot
+    from .research import STEPS
+
+    evidence = {}
+    for group in {(m.run_id, m.horizon) for m in records}:
+        peers = list(db.scalars(select(Model).where(Model.run_id == group[0], Model.horizon == group[1])))
+        rows = load_snapshot(db.get(Snapshot, peers[0].snapshot_id))
+        evidence.update(assess_models(peers, rows, STEPS[group[1]]))
+    response = []
+    for model in records:
+        item = encode(model, ("artifact_path", "diagnostics"))
+        item["metrics"] = {**model.metrics, "assessment": evidence[model.id]}
+        failed = [
+            CHECK_LABELS.get(key, key)
+            for key, passed in model.metrics.get("acceptance_checks", {}).items()
+            if not passed
+        ]
+        if failed and model.metrics.get("evaluation_mode", "holdout") == "holdout":
+            item["reason"] = "未通过：" + "、".join(failed)
+        response.append(item)
+    return response
 
 
 @app.get(API_PREFIX + "/models/{identifier}/diagnostics")
@@ -396,7 +418,7 @@ def prediction_create(body: PredictionRequest, db: DB, idempotency_key: str | No
     for identifier in body.model_ids:
         model = require(db.get(Model, identifier), "模型不存在")
         if (
-            not model.selected
+            (not model.selected and not body.allow_unvalidated)
             or model.stock_id != body.stock_id
             or model.horizon != body.horizon
             or model.price_basis != body.price_basis
@@ -449,6 +471,13 @@ def ai_retry(identifier: str, db: DB):
     prediction = require(db.get(Prediction, identifier))
     if not prediction.result:
         raise DomainError("数值预测尚未完成", "prediction_not_ready", 409)
+    if not os.getenv("AI_ANALYSIS_URL"):
+        raise DomainError(
+            "尚未配置联网AI服务，请先设置分析接口；已保存的模型预测可独立查看", "ai_not_configured", 409
+        )
+    for old in db.scalars(select(Job).where(Job.kind == "ai", Job.status.in_(["queued", "running"]))):
+        if old.payload.get("prediction_id") == identifier:
+            return {"job_id": old.id}
     job = Job(kind="ai", payload={"prediction_id": identifier})
     db.add(job)
     db.commit()

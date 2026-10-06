@@ -27,14 +27,20 @@ export function Forecast({
   const [horizon, setHorizon] = useState("next_day");
   const [chosen, setChosen] = useState<string[] | null>(null);
   const [reference, setReference] = useState("");
-  const [withAI, setWithAI] = useState(false);
+  const [experimental, setExperimental] = useState(false);
+  const [resultModelId, setResultModelId] = useState("");
+  const [aiJob, setAIJob] = useState("");
   const [observationStart, setObservationStart] = useState("");
   const storageKey = "prediction-job-" + stock?.id + "-" + basis;
   const [job, setJob] = useState(localStorage.getItem(storageKey) || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [predictionId, setPredictionId] = useState("");
-  const { data: models } = useLoad(
+  const {
+    data: models,
+    error: modelError,
+    loading: modelsLoading,
+  } = useLoad(
     () =>
       stock
         ? api<Model[]>(
@@ -43,11 +49,11 @@ export function Forecast({
                 stock_id: stock.id,
                 price_basis: basis,
                 horizon,
-                selected_only: "true",
+                selected_only: String(!experimental),
               }),
           )
         : Promise.resolve([]),
-    [stock?.id, basis, horizon, version],
+    [stock?.id, basis, horizon, experimental, version],
   );
   const { data: history } = useLoad(
     () =>
@@ -62,7 +68,12 @@ export function Forecast({
   );
   const latest =
     predictionId ||
-    history?.find((p) => p.horizon === horizon && p.result.models?.length)?.id;
+    history?.find(
+      (p) =>
+        p.horizon === horizon &&
+        p.config.price_basis === basis &&
+        p.result.models?.length,
+    )?.id;
   const { data: prediction, error: historyError } = useLoad(
     () =>
       latest
@@ -71,7 +82,13 @@ export function Forecast({
     [latest, version],
   );
   const selected = chosen?.filter((id) => models?.some((m) => m.id === id));
-  const activeIds = selected ?? (models?.slice(0, 3).map((m) => m.id) || []);
+  const defaults =
+    models
+      ?.filter((m) => m.run_id === models[0]?.run_id && m.family !== "naive")
+      .sort((a, b) => a.metrics.validation.mae - b.metrics.validation.mae)
+      .slice(0, 3)
+      .map((m) => m.id) || [];
+  const activeIds = selected ?? defaults;
   const result = prediction?.result;
   const colors = ["#477956", "#a38b59", "#7e83a1"];
   const chart = useMemo<EChartsOption>(() => {
@@ -164,13 +181,15 @@ export function Forecast({
           price_basis: basis,
           horizon,
           model_ids: activeIds,
-          with_ai: withAI,
+          with_ai: false,
+          allow_unvalidated: experimental,
           reference_price: reference ? Number(reference) : null,
           observation_start: observationStart || null,
         },
       );
       setJob(response.job_id);
       setPredictionId(response.prediction_id);
+      setResultModelId("");
       localStorage.setItem(storageKey, response.job_id);
     } catch (e) {
       setError((e as Error).message);
@@ -178,7 +197,9 @@ export function Forecast({
       setBusy(false);
     }
   }
-  const first = result?.models?.[0];
+  const first =
+    result?.models?.find((m: any) => m.model_id === resultModelId) ||
+    result?.models?.[0];
   const endpoint = first?.points?.at(-1);
   return (
     <>
@@ -186,12 +207,26 @@ export function Forecast({
         <div>
           <span className="eyebrow">FORECAST & PERSPECTIVE</span>
           <h1>预测分析</h1>
-          <p>查看价格区间、模型分歧与剩余空间，保留每一次判断。</p>
+          <p>先选择模型与周期，生成数值预测，再按需联网解释。</p>
         </div>
         <span className="pill">收盘后 · 手动分析</span>
       </div>
       <section className="card">
+        <h2>1 · 选择模型与预测周期</h2>
         <div className="prediction-settings">
+          <label>
+            模型范围
+            <select
+              value={experimental ? "research" : "qualified"}
+              onChange={(e) => {
+                setExperimental(e.target.value === "research");
+                setChosen(null);
+              }}
+            >
+              <option value="qualified">已通过验收的模型</option>
+              <option value="research">全部模型 · 研究试算</option>
+            </select>
+          </label>
           <label>
             预测周期
             <select
@@ -239,7 +274,7 @@ export function Forecast({
             onClick={start}
           >
             <Telescope size={16} />
-            {busy ? "提交中…" : "生成预测"}
+            {busy ? "提交中…" : "2 · 生成模型预测"}
           </button>
         </div>
         <div className="check-group">
@@ -248,6 +283,7 @@ export function Forecast({
               <input
                 type="checkbox"
                 checked={activeIds.includes(m.id)}
+                disabled={!activeIds.includes(m.id) && activeIds.length >= 3}
                 onChange={(e) => {
                   const next = e.target.checked
                     ? [...activeIds, m.id]
@@ -255,22 +291,28 @@ export function Forecast({
                   setChosen(next);
                 }}
               />
-              {m.family} · {m.id.slice(0, 6)}
+              {m.family} · {m.id.slice(0, 6)} ·{" "}
+              {m.selected ? "已入选" : "未验收 / 研究"} · MAE{" "}
+              {money(m.metrics.test?.mae)}
             </label>
           ))}
-          <label>
-            <input
-              type="checkbox"
-              checked={withAI}
-              disabled={integrations?.ai !== "configured"}
-              onChange={(e) => setWithAI(e.target.checked)}
-            />
-            联网AI解释{integrations?.ai !== "configured" ? "（未配置）" : ""}
-          </label>
         </div>
-        {!models?.length && (
+        <p className="section-note">
+          默认按最近实验的验证MAE选择最多三个非基准模型，也可手动调整。每次预测都会保存模型版本、输入数据和数值结果。下一交易日预测OHLC；20
+          / 60交易日预测每日收盘路径和区间。
+        </p>
+        {experimental && (
           <p className="note-box">
-            当前周期没有达标模型。先训练并查看报告；系统不会强行提供预测或参考买卖区间。
+            研究试算允许选择未入选模型，结果明确标注为未经验证；更长持有期及可执行买卖点尚无策略验证。
+          </p>
+        )}
+        {modelsLoading && <p className="section-note">正在读取模型…</p>}
+        {modelError && <p className="error">{modelError}</p>}
+        {!modelsLoading && !modelError && !models?.length && (
+          <p className="note-box">
+            {experimental
+              ? "当前周期暂无已训练模型，请先运行对应周期的训练。"
+              : "当前周期没有达标模型。可查看训练报告，或切换“全部模型 · 研究试算”来检查现有模型的预测结果。"}
           </p>
         )}
         {error && <p className="error">{error}</p>}
@@ -284,6 +326,9 @@ export function Forecast({
               <div className="card-heading">
                 <div>
                   <h2>价格走势与边际预测区间</h2>
+                  {result.experimental && (
+                    <span className="pill gray">研究试算 · 未经验证</span>
+                  )}
                   <p>
                     基于 {result.data_cutoff} 数据 · {horizons[result.horizon]}{" "}
                     · 不是实时行情
@@ -297,7 +342,18 @@ export function Forecast({
               </p>
             </section>
             <aside className="forecast-summary">
-              <h3>首个模型 · {first.family}</h3>
+              <h3>查看模型 · {first.family}</h3>
+              <select
+                aria-label="结果模型"
+                value={first.model_id}
+                onChange={(e) => setResultModelId(e.target.value)}
+              >
+                {result.models.map((m: any) => (
+                  <option key={m.model_id} value={m.model_id}>
+                    {m.family} · {m.model_id.slice(0, 6)}
+                  </option>
+                ))}
+              </select>
               <small className="muted">终点收盘价估计 / 区间</small>
               <strong>¥ {money(endpoint?.estimate)}</strong>
               <p>
@@ -306,9 +362,12 @@ export function Forecast({
               <ul>
                 <li>目标覆盖率：{pct(first.nominal_coverage)}</li>
                 <li>历史实际覆盖：{pct(first.historical_coverage)}</li>
+                <li>
+                  参数拟合截止：{first.fitted_through || "历史结果未记录"}
+                </li>
                 <li>参考价格：¥ {money(result.reference_price)}</li>
                 <li>到区间下沿：{pct(first.target_upside?.lower)}</li>
-                <li>到中位值：{pct(first.target_upside?.median)}</li>
+                <li>到点估计：{pct(first.target_upside?.median)}</li>
                 <li>到区间上沿：{pct(first.target_upside?.upper)}</li>
               </ul>
               <p className="section-note">
@@ -400,7 +459,7 @@ export function Forecast({
                     <th>期末估计</th>
                     <th>期末区间</th>
                     <th>历史覆盖率</th>
-                    <th>到中位值空间</th>
+                    <th>到点估计空间</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -429,25 +488,38 @@ export function Forecast({
           </div>
           <section className="card" style={{ marginTop: 20 }}>
             <div className="card-heading">
-              <h2>联网信息与情景解释</h2>
+              <h2>3 · 按需联网AI解释</h2>
               <button
                 className="secondary"
-                disabled={integrations?.ai !== "configured"}
+                disabled={integrations?.ai !== "configured" || busy}
                 onClick={async () => {
+                  setBusy(true);
+                  setError("");
                   try {
                     const r = await post<{ job_id: string }>(
                       "/predictions/" + prediction!.id + "/ai-analysis",
                       {},
                     );
-                    setJob(r.job_id);
+                    setAIJob(r.job_id);
                   } catch (e) {
                     setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
                   }
                 }}
               >
-                重新分析
+                {prediction?.ai_analyses?.length
+                  ? "重新联网解释"
+                  : "解释这次预测"}
               </button>
             </div>
+            <p className="section-note">
+              {integrations?.ai === "configured"
+                ? "服务接口已配置；点击后才检索公告、财报与事件，并提供引用来源。"
+                : "当前未连接联网AI服务。接入支持联网检索的服务后才能解释这次预测；数值预测可以独立完成。"}{" "}
+              AI接收这次保存的模型结果并解释，不替代或改写预测价格。
+            </p>
+            {aiJob && <JobPanel id={aiJob} finished={refresh} />}
             {prediction?.ai_analyses?.length ? (
               prediction.ai_analyses.map((a) => (
                 <div key={a.id}>
@@ -478,29 +550,36 @@ export function Forecast({
         </>
       ) : (
         <section className="card">
-          <Empty title="等待一次经过验证的预测">
-            选择通过训练验收的模型后生成分析；新结果不会覆盖历史预测。
+          <Empty title="等待模型预测">
+            选择模型及周期后生成数值结果，完成后可以单独请求联网解释。
           </Empty>
         </section>
       )}
       <section className="card">
         <h2>历史预测</h2>
         {history?.length ? (
-          history.map((p) => (
-            <button
-              className="history-item"
-              key={p.id}
-              onClick={() => setPredictionId(p.id)}
-            >
-              <span>
-                {horizons[p.horizon]} ·{" "}
-                {p.created_at.slice(0, 16).replace("T", " ")}
-              </span>
-              <span>
-                {p.result.models?.length ? "查看结果" : "尚无完成结果"} →
-              </span>
-            </button>
-          ))
+          history
+            .filter((p) => p.config.price_basis === basis)
+            .map((p) => (
+              <button
+                className="history-item"
+                key={p.id}
+                onClick={() => {
+                  setPredictionId(p.id);
+                  setHorizon(p.horizon);
+                  setChosen(null);
+                  setResultModelId("");
+                }}
+              >
+                <span>
+                  {horizons[p.horizon]} ·{" "}
+                  {p.created_at.slice(0, 16).replace("T", " ")}
+                </span>
+                <span>
+                  {p.result.models?.length ? "查看结果" : "尚无完成结果"} →
+                </span>
+              </button>
+            ))
         ) : (
           <p className="section-note">
             暂无历史记录。预测生成后会保留模型版本和数据截止时间。

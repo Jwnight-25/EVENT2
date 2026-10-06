@@ -195,3 +195,107 @@ def test_spawned_worker_and_long_horizon_paths(client):
                 len(client.get("/api/v1/models/" + models[0]["id"] + "/diagnostics").json()["by_target"])
                 == steps
             )
+
+
+def test_repeat_research_parameter_search_and_experimental_prediction(client, monkeypatch):
+    identifier = stock(client)
+    history_upload(client, identifier)
+    request = {
+        "stock_id": identifier,
+        "horizons": ["next_day"],
+        "families": ["ridge"],
+        "evaluation_mode": "research",
+        "trials_per_family": 3,
+        "time_budget_seconds": 60,
+        "ridge_alpha_min": 0.1,
+        "ridge_alpha_max": 100,
+    }
+    first = client.post("/api/v1/training-runs", json=request)
+    assert first.status_code == 202
+    execute_job(first.json()["job_id"])
+    detail = client.get("/api/v1/training-runs/" + first.json()["run_id"]).json()
+    parameters = [t["parameters"]["alpha"] for t in detail["trials"] if t["family"] == "ridge"]
+    assert len(parameters) == 3 and len(set(parameters)) == 3
+    assert parameters[0] == 0.1
+    models = client.get("/api/v1/models", params={"stock_id": identifier, "run_id": detail["id"]}).json()
+    assert models and not any(m["selected"] for m in models)
+    candidate = next(m for m in models if m["family"] == "ridge")
+    assert candidate["metrics"]["assessment"]["evaluation_mode"] == "research"
+    assert "interval_score" in candidate["metrics"]["test"]
+    assert candidate["metrics"]["test"]["sampling"] == "consecutive_trading_origins"
+    # Explicit experimental selection is necessary; it doesn't grant wrong-horizon access.
+    forecast_request = {"stock_id": identifier, "horizon": "next_day", "model_ids": [candidate["id"]]}
+    assert client.post("/api/v1/predictions", json=forecast_request).status_code == 409
+    forecast_request["allow_unvalidated"] = True
+    prediction = client.post("/api/v1/predictions", json=forecast_request).json()
+    assert (
+        client.post("/api/v1/predictions/" + prediction["prediction_id"] + "/ai-analysis").status_code == 409
+    )
+    execute_job(prediction["job_id"])
+    saved = client.get("/api/v1/predictions/" + prediction["prediction_id"]).json()
+    assert saved["result"]["experimental"] is True and saved["ai_status"] == "not_requested"
+    assert saved["ai_analyses"] == []
+    assert (
+        client.post("/api/v1/predictions", json={**forecast_request, "horizon": "one_month"}).status_code
+        == 409
+    )
+    # Research may repeat with a different budget, but can't be relabeled a fresh holdout.
+    assert (
+        client.post("/api/v1/training-runs", json={**request, "evaluation_mode": "holdout"}).status_code
+        == 409
+    )
+    repeated = client.post("/api/v1/training-runs", json={**request, "time_budget_seconds": 90})
+    assert repeated.status_code == 202
+    execute_job(repeated.json()["job_id"])
+    assert client.get("/api/v1/jobs/" + repeated.json()["job_id"]).json()["status"] == "succeeded"
+    monkeypatch.delenv("AI_ANALYSIS_URL", raising=False)
+    assert (
+        client.post("/api/v1/predictions/" + prediction["prediction_id"] + "/ai-analysis").json()["code"]
+        == "ai_not_configured"
+    )
+    # The AI action cannot change numeric results, including when the service is missing.
+    assert (
+        client.get("/api/v1/predictions/" + prediction["prediction_id"]).json()["result"] == saved["result"]
+    )
+    from backend.app.integrations import HttpAnalysisProvider
+
+    seen = []
+
+    def test_analysis(_provider, body):
+        seen.append(body)
+        return {"text": "TEST ONLY: explanation", "sources": [{"url": "https://example.com/test"}]}
+
+    monkeypatch.setenv("AI_ANALYSIS_URL", "https://example.com/test-only-analysis")
+    monkeypatch.setattr(HttpAnalysisProvider, "analyze", test_analysis)
+    ai = client.post("/api/v1/predictions/" + prediction["prediction_id"] + "/ai-analysis").json()
+    # Repeated clicks while queued return the same task, avoiding duplicate analysis.
+    assert client.post("/api/v1/predictions/" + prediction["prediction_id"] + "/ai-analysis").json() == ai
+    execute_job(ai["job_id"])
+    explained = client.get("/api/v1/predictions/" + prediction["prediction_id"]).json()
+    assert explained["ai_status"] == "succeeded" and seen[0]["forecast"] == saved["result"]
+    assert explained["result"] == saved["result"] and len(explained["ai_analyses"]) == 1
+
+
+def test_skill_test_respects_pairing_dependence_and_parameter_bounds(client):
+    from backend.app.assessment import compare_errors
+    from backend.app.research import candidates
+
+    rng = np.random.default_rng(14)
+    error = rng.uniform(0.1, 0.2, 128)
+    base_error = error + rng.uniform(0.01, 0.03, 128)
+    series = {"dates": list(range(128)), "residuals": error.tolist(), "origin_indices": list(range(128))}
+    base = {**series, "residuals": base_error.tolist()}
+    result = compare_errors(series, base, 1)
+    assert result["pvalue"] < 0.05 and result["gain_ci95"][0] > 0
+    assert compare_errors(series, base, 60)["status"] == "insufficient_samples"
+    assert compare_errors({**series, "origin_indices": list(range(0, 256, 2))}, base, 1)["pvalue"] is None
+    assert compare_errors(series, {**base, "dates": list(range(1, 129))}, 1)["status"] == "unaligned"
+    assert (
+        compare_errors({**series, "residuals": [0.1] * 128}, {**base, "residuals": [0.2] * 128}, 1)["pvalue"]
+        is None
+    )
+    assert max(p["order"][0] for p in candidates("arima", {"arima_max_order": 3})) == 3
+    bad = client.post(
+        "/api/v1/training-runs", json={"stock_id": "anything", "ridge_alpha_min": 10, "ridge_alpha_max": 1}
+    )
+    assert bad.status_code == 422

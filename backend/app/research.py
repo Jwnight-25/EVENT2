@@ -24,7 +24,7 @@ from .market import load_snapshot
 from .calendar import future_dates
 
 STEPS = {"next_day": 1, "one_month": 20, "three_months": 60}
-VERSION = "direct-multistep-v1"
+VERSION = "direct-multistep-v2"
 
 
 def relative_improvement(error, baseline):
@@ -142,17 +142,46 @@ def interval_prices(vector, width, close, horizon):
     )
 
 
-def candidates(family):
-    return {
+def candidates(family, config=None):
+    config = config or {}
+    expanded = config.get("search_profile") == "expanded"
+    orders = [[0, 1, 0], [1, 1, 0], [0, 1, 1], [1, 1, 1], [1, 0, 1]]
+    limit = config.get("arima_max_order", 2)
+    orders += [
+        [p, d, q]
+        for p in range(limit + 1)
+        for q in range(limit + 1)
+        for d in (0, 1)
+        if [p, d, q] not in orders and p + q > 0
+    ]
+    grid = {
         "naive": [{}],
-        "ridge": [{"alpha": a} for a in (1.0, 10.0, 100.0)],
-        "arima": [{"order": p} for p in ([0, 1, 0], [1, 1, 0], [0, 1, 1], [2, 1, 1], [1, 0, 1])],
-        "sarima": [{"order": [1, 1, 0], "seasonal_order": s} for s in ([1, 0, 0, 5], [0, 0, 1, 5])],
-        "lightgbm": [{"num_leaves": n, "n_estimators": 80, "learning_rate": 0.04} for n in (7, 15)],
-        "garch": [{"order": [1, 1, 0], "p": 1, "q": 1}],
-        "nhits": [{"input_size": 60, "max_steps": 100}],
-        "patchtst": [{"input_size": 60, "max_steps": 100}],
-    }[family]
+        "ridge": [
+            {"alpha": float(a)}
+            for a in np.unique(
+                np.geomspace(
+                    config.get("ridge_alpha_min", 0.01),
+                    config.get("ridge_alpha_max", 1000),
+                    12 if expanded else 6,
+                )
+            )
+        ],
+        "arima": [{"order": p} for p in orders],
+        "sarima": [
+            {"order": [1, 1, 0], "seasonal_order": [p, 0, q, period]}
+            for period in ((5, 20) if expanded else (5,))
+            for p, q in ((1, 0), (0, 1), (1, 1))
+        ],
+        "lightgbm": [
+            {"num_leaves": n, "n_estimators": count, "learning_rate": rate}
+            for count, rate in ((80, 0.04), (160, 0.02))
+            for n in (7, 15)
+        ],
+        "garch": [{"order": [1, 1, 0], "p": p, "q": q} for p, q in ((1, 1), (1, 2), (2, 1))],
+        "nhits": [{"input_size": size, "max_steps": count} for size in (60, 120) for count in (100, 200)],
+        "patchtst": [{"input_size": size, "max_steps": count} for size in (60, 120) for count in (100, 200)],
+    }
+    return grid[family]
 
 
 def fit(rows, features, end, horizon, family, parameters, seed):
@@ -302,17 +331,17 @@ def volatility_scale(artifact, rows, origin):
     return np.repeat(ratio[0], 4) if artifact["horizon"] == "next_day" else ratio
 
 
-def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None):
+def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None, max_samples=32):
     horizon = artifact["horizon"]
     # Frozen coefficients within this evaluation window. Actual observations update
     # only causal input/state, never fitted parameters.
     origins = list(range(start, end - STEPS[horizon] + 1))
-    if len(origins) > 32:
-        origins = sorted(set(np.linspace(origins[0], origins[-1], 32, dtype=int).tolist()))
+    origins = origins[-max_samples:]
     estimates, actuals, residuals, covered, widths, dates = [], [], [], [], [], []
     full_predicted, full_actual = [], []
     target_errors = []
     pinballs = []
+    interval_scores = []
     for origin in origins:
         checkpoint(job_id, f"评估 {artifact['family']} · {horizon}", deadline=deadline)
         pred = forecast(artifact, rows, features, origin)
@@ -332,6 +361,15 @@ def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None)
             covered.append(((real_price >= low) & (real_price <= high)).astype(float).tolist())
             widths.append((high - low).tolist())
             tail = (1 - artifact["coverage"]) / 2
+            alpha = 1 - artifact["coverage"]
+            interval_scores.append(
+                (
+                    high
+                    - low
+                    + 2 / alpha * np.maximum(low - real_price, 0)
+                    + 2 / alpha * np.maximum(real_price - high, 0)
+                ).tolist()
+            )
             errors_low, errors_high = real_price - low, real_price - high
             pinballs.append(
                 (
@@ -357,13 +395,21 @@ def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None)
         "evaluation_end": dates[-1],
         "target": "close_at_horizon",
         "overlapping_labels": STEPS[horizon] > 1,
+        "sampling": "consecutive_trading_origins",
+        "nonoverlap_sample_count": len(origins[:: STEPS[horizon]]),
+        "bias": float(np.mean(actuals - estimates)),
+        "mase": None,
     }
+    scale = np.mean(np.abs(np.diff([r["close"] for r in rows[: artifact["fit_end"] + 1]])))
+    if scale > 1e-12:
+        metric["mase"] = metric["mae"] / float(scale)
     if covered:
         metric.update(
             {
                 "coverage": float(np.mean(np.array(covered)[:, -1])),
                 "mean_width": float(np.mean(np.array(widths)[:, -1])),
                 "pinball_loss": float(np.mean(np.array(pinballs)[:, -1])),
+                "interval_score": float(np.mean(np.array(interval_scores)[:, -1])),
                 "coverage_by_target": np.mean(covered, axis=0).tolist(),
                 "width_by_target": np.mean(widths, axis=0).tolist(),
             }
@@ -379,6 +425,7 @@ def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None)
         for i, field in enumerate(fields)
     }
     series = {
+        "origin_indices": origins,
         "dates": dates,
         "predicted": estimates.tolist(),
         "actual": actuals.tolist(),
@@ -386,6 +433,7 @@ def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None)
     }
     series["by_target"] = {
         field: {
+            "origin_indices": origins,
             "dates": [rows[origin + (1 if horizon == "next_day" else i + 1)]["time"] for origin in origins],
             "predicted": predicted_matrix[:, i].tolist(),
             "actual": actual_matrix[:, i].tolist(),
@@ -409,7 +457,7 @@ def diagnose(series, rows):
         "pacf": [],
         "ljung_box_pvalue": None,
         "arch_pvalue": None,
-        "notes": "多步误差可能重叠；检验结果不等同可交易性。",
+        "notes": "以下是样本外预测误差诊断；p>0.05仅表示未拒绝原假设，不证明可靠。长周期误差重叠，Ljung-Box/ARCH仅作探索性诊断。",
         "skew": float(skew(residuals)) if np.std(residuals) > 0 else 0.0,
         "kurtosis": float(kurtosis(residuals)) if np.std(residuals) > 0 else 0.0,
     }
@@ -453,6 +501,8 @@ def load_artifact(model):
 
 
 def train_job(job_id):
+    from .assessment import assess_models, CHECK_LABELS
+
     with SessionLocal() as db:
         job = db.get(Job, job_id)
         run = db.get(TrainingRun, job.result["run_id"])
@@ -460,12 +510,19 @@ def train_job(job_id):
         rows = load_snapshot(snapshot)
         config = run.config
         run_id, stock_id, basis, snapshot_id = run.id, run.stock_id, snapshot.price_basis, snapshot.id
-    deadline = time.monotonic() + config["time_budget_seconds"]
+    started = time.monotonic()
+    deadline = started + config["time_budget_seconds"]
+    mode = config.get("evaluation_mode", "holdout")
+    samples = config.get("evaluation_samples", 128)
     features = feature_matrix(rows)
     n = len(rows)
     train_end, val_end, cal_end, test_end = int(n * 0.5) - 1, int(n * 0.7) - 1, int(n * 0.85) - 1, n - 1
     report = {
         "version": VERSION,
+        "evaluation_mode": mode,
+        "evaluation_note": "可反复调参，评估结果仅供研究，不再视作独立测试"
+        if mode == "research"
+        else "本数据版本该周期只允许一次最终测试；通过门槛不等于可靠性证明",
         "provenance": provenance(),
         "policy": {
             "min_improvement": config["min_improvement"],
@@ -509,15 +566,21 @@ def train_job(job_id):
         exhausted = False
         families = ["naive", *dict.fromkeys(f for f in config["families"] if f != "naive")]
         # Round-robin search ensures a small budget still compares model families.
+        grids = {f: candidates(f, config) for f in families}
         proposals = [
             (family, parameters)
-            for index in range(max(len(candidates(f)) for f in families))
+            for index in range(max(len(grids[f]) for f in families))
             for family in families
-            for parameters in candidates(family)[index : index + 1]
+            for parameters in grids[family][index : index + 1]
         ]
+        family_counts = {f: 0 for f in families}
         for family, parameters in proposals:
-            if family != "naive" and trial_count >= config["max_trials"]:
-                continue
+            if family != "naive":
+                cap = config.get("trials_per_family")
+                if (cap and family_counts[family] >= cap) or (
+                    not cap and trial_count >= config["max_trials"]
+                ):
+                    continue
             checkpoint(job_id, f"调参 {horizon} · {family}", deadline=None)
             try:
                 checkpoint(job_id, f"调参 {horizon} · {family}", deadline=deadline)
@@ -555,6 +618,7 @@ def train_job(job_id):
                 db.commit()
             if family != "naive":
                 trial_count += 1
+                family_counts[family] += 1
         if exhausted:
             report["horizons"][horizon] = {
                 "status": "budget_exhausted",
@@ -577,7 +641,9 @@ def train_job(job_id):
                     rows, features, val_end, horizon, family, settings["parameters"], config["seed"]
                 )
                 artifact["coverage"] = config["coverage"]
-                _, cal_errors, _ = evaluate(artifact, rows, features, val_end + 1, cal_end, job_id, deadline)
+                _, cal_errors, _ = evaluate(
+                    artifact, rows, features, val_end + 1, cal_end, job_id, deadline, max_samples=samples
+                )
                 quantile = min(1.0, np.ceil((len(cal_errors) + 1) * config["coverage"]) / len(cal_errors))
                 width = np.quantile(np.abs(cal_errors), quantile, axis=0, method="higher")
                 artifact["width"] = width
@@ -588,9 +654,18 @@ def train_job(job_id):
                     db.get(TrainingRun, run_id).report = report
                     db.commit()
                 test_metric, _, series = evaluate(
-                    artifact, rows, features, cal_end + 1, test_end, job_id, deadline, width
+                    artifact,
+                    rows,
+                    features,
+                    cal_end + 1,
+                    test_end,
+                    job_id,
+                    deadline,
+                    width,
+                    max_samples=samples,
                 )
                 metrics = {
+                    "evaluation_mode": mode,
                     "validation": {"mae": settings["score"], "windows": settings["windows"]},
                     "test": test_metric,
                     "nominal_coverage": config["coverage"],
@@ -652,13 +727,28 @@ def train_job(job_id):
                 "coverage": metric["coverage"] >= config["coverage"] - 0.15,
                 "interval_width": metric["mean_width"] <= max(base["mean_width"] * 1.25, 1e-10),
             }
-            model.metrics = {**model.metrics, "improvement": improvement, "acceptance_checks": checks}
-            model.selected = all(checks.values())
+            model.metrics = {
+                **model.metrics,
+                "improvement": improvement,
+                "validation_improvement": val_improvement,
+                "acceptance_checks": checks,
+                "passes_thresholds": all(checks.values()),
+            }
+            model.selected = mode == "holdout" and all(checks.values())
             model.reason = (
-                "通过预设验收规则"
+                "通过预设验收规则；不代表已证明可靠"
                 if model.selected
-                else "未通过：" + "、".join(key for key, passed in checks.items() if not passed)
+                else ("研究模型；" if mode == "research" else "")
+                + (
+                    "达到误差门槛，仍需新的独立数据验收"
+                    if all(checks.values())
+                    else "未通过："
+                    + "、".join(CHECK_LABELS[key] for key, passed in checks.items() if not passed)
+                )
             )
+        evidence = assess_models(local_models, rows, steps)
+        for model in local_models:
+            model.metrics = {**model.metrics, "assessment": evidence[model.id]}
         staged_models.extend(local_models)
         completed_horizons.append(horizon)
         report["horizons"][horizon] = {
@@ -666,11 +756,17 @@ def train_job(job_id):
             "selected": [m.id for m in local_models if m.selected],
             "nominees": nominees,
             "trials": trial_count,
-            "message": "没有模型达标" if not any(m.selected for m in local_models) else "模型验收完成",
+            "trials_by_family": family_counts,
+            "message": "研究实验完成；模型仅供研究选择"
+            if mode == "research"
+            else "没有模型达标"
+            if not any(m.selected for m in local_models)
+            else "模型验收完成",
         }
     checkpoint(job_id, "保存实验、模型与验收结果", 95)
+    report["elapsed_seconds"] = round(time.monotonic() - started, 2)
     with SessionLocal() as db:
-        for horizon in completed_horizons:
+        for horizon in completed_horizons if mode == "holdout" else []:
             for old in db.scalars(
                 select(Model).where(
                     Model.stock_id == stock_id,
@@ -735,6 +831,10 @@ def prediction_job(job_id):
             {
                 "model_id": model.id,
                 "family": model.family,
+                "selected_at_prediction": model.selected,
+                "evaluation_mode": model.metrics.get("evaluation_mode", "holdout"),
+                "fitted_through": model.metrics["fitted_through"],
+                "experimental": not model.selected or model.metrics.get("evaluation_mode") == "research",
                 "points": points,
                 "candle": candle,
                 "ohlc_intervals": ohlc_intervals,
@@ -761,6 +861,7 @@ def prediction_job(job_id):
         "reference_price": reference,
         "reference_source": "manual" if config.get("reference_price") else "snapshot_close",
         "models": result_models,
+        "experimental": any(m["experimental"] for m in result_models),
         "history": rows[-120:],
         "strategy": {
             "status": "not_validated",

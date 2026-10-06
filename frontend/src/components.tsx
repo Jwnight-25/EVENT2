@@ -186,7 +186,7 @@ export function JobPanel({
         )}
       </div>
       {job?.progress != null && <progress max="100" value={job.progress} />}
-      <small>任务 {id.slice(0, 8)} · 训练需要独立工作进程运行</small>
+      <small>任务 {id.slice(0, 8)} · 由本机工作进程运行</small>
       {(error || job?.error) && <p className="error">{error || job?.error}</p>}
     </div>
   );

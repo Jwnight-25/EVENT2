@@ -42,6 +42,7 @@ export type Prediction = {
   horizon: string;
   created_at: string;
   result: Record<string, any>;
+  config: Record<string, any>;
   ai_status: string;
   ai_analyses?: any[];
   actual_bars?: Bar[];
@@ -87,3 +88,11 @@ export const pct = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value)
     ? (value * 100).toFixed(1) + "%"
     : "—";
+export const probability = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value < 0.0001
+      ? "<0.0001"
+      : value.toFixed(4)
+    : "未计算";
+export const score = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value.toFixed(4) : "—";
