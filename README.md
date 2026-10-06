@@ -10,6 +10,7 @@
 - `修改记录.md`：每次提交前更新的改动、验证与限制。
 - `compose.yaml`：可选PostgreSQL本机服务。
 - `docs/implementation.md`：已实现能力、实验方法、接口预留和限制。
+- `docs/example-data.md`：本机招商银行样例的数据范围、格式、存储位置和核验结果。
 
 ## 安装与启动
 
