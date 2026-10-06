@@ -1,7 +1,34 @@
-import { useState, useMemo } from "react";
-import { Upload, Plus, ArrowUpRight, Download } from "lucide-react";
+import { useState, useMemo, useEffect } from "react";
+import {
+  Upload,
+  Plus,
+  ArrowUpRight,
+  Download,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+} from "lucide-react";
 import { api, post, money, type Stock, type Bar } from "./api";
-import { Chart, Empty, Modal, axis, useLoad } from "./components";
+import {
+  Chart,
+  Empty,
+  Modal,
+  axis,
+  useLoad,
+  type ChartZoom,
+} from "./components";
+import type { EChartsOption } from "echarts";
+import {
+  FALL,
+  RISE,
+  volumeColor,
+  priceBounds,
+  rangeForDates,
+  recentWindow,
+  visibleIndices,
+  zoomWindow,
+  type WindowRange,
+} from "./chartUtils";
 
 export function AddStock({
   close,
@@ -279,6 +306,17 @@ export function Market({
   const [interval, setInterval] = useState("1d");
   const [mode, setMode] = useState("k");
   const [upload, setUpload] = useState(false);
+  const [window, setWindow] = useState<WindowRange | null>(null);
+  const [vertical, setVertical] = useState<WindowRange>({ start: 0, end: 100 });
+  const [dateStart, setDateStart] = useState("");
+  const [dateEnd, setDateEnd] = useState("");
+  const [priceMin, setPriceMin] = useState("");
+  const [priceMax, setPriceMax] = useState("");
+  const [fixedPrices, setFixedPrices] = useState<{
+    min: number;
+    max: number;
+  } | null>(null);
+  const [controlError, setControlError] = useState("");
   const { data, error, loading } = useLoad(
     () =>
       stock
@@ -288,25 +326,68 @@ export function Market({
                 stock_id: stock.id,
                 interval,
                 price_basis: basis,
-                limit: "1000",
+                limit: "10000",
               }),
           )
         : Promise.resolve({ bars: [], total: 0, aggregation: null }),
     [stock?.id, interval, basis, version],
   );
   const rows = data?.bars || [];
+  const range = window || recentWindow(rows.length);
+  const [firstIndex, lastIndex] = visibleIndices(rows.length, range);
+  const prices = fixedPrices || priceBounds(rows, range);
+  useEffect(() => {
+    const [first, last] = visibleIndices(
+      data?.bars.length || 0,
+      window || recentWindow(data?.bars.length || 0),
+    );
+    setDateStart(data?.bars[first]?.time.slice(0, 10) || "");
+    setDateEnd(data?.bars[last]?.time.slice(0, 10) || "");
+  }, [data]);
+  function changeWindow(next: WindowRange) {
+    setWindow(next);
+    const [first, last] = visibleIndices(rows.length, next);
+    setDateStart(rows[first]?.time.slice(0, 10) || "");
+    setDateEnd(rows[last]?.time.slice(0, 10) || "");
+    setControlError("");
+  }
+  function resetPrice() {
+    setFixedPrices(null);
+    setVertical({ start: 0, end: 100 });
+    setPriceMin("");
+    setPriceMax("");
+    setControlError("");
+  }
+  function onZoom(ranges: ChartZoom[]) {
+    const horizontal = ranges.find((r) => r.id === "market-time");
+    const price = ranges.find((r) => r.id === "market-price");
+    if (horizontal)
+      changeWindow({ start: horizontal.start, end: horizontal.end });
+    if (price) setVertical({ start: price.start, end: price.end });
+  }
   const last = rows.at(-1);
   const previous = rows.at(-2);
   const change =
     last && previous ? (last.close / previous.close - 1) * 100 : null;
-  const chart = useMemo(
+  const chart = useMemo<EChartsOption>(
     () => ({
       backgroundColor: "transparent",
-      tooltip: { trigger: "axis" as const },
+      animation: false,
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        axisPointer: { type: "cross" },
+        formatter: (params: any) => {
+          const item = Array.isArray(params) ? params[0] : params;
+          const r = rows[item?.dataIndex];
+          if (!r) return "";
+          return `${r.time}<br/>开 ¥${money(r.open)}　收 ¥${money(r.close)}<br/>高 ¥${money(r.high)}　低 ¥${money(r.low)}<br/>成交量 ${r.volume.toLocaleString("zh-CN")} 股`;
+        },
+      },
       axisPointer: { link: [{ xAxisIndex: "all" as const }] },
       grid: [
-        { left: 56, right: 25, top: 25, height: "62%" },
-        { left: 56, right: 25, top: "77%", height: "11%" },
+        { left: 76, right: 18, top: 30, height: "58%" },
+        { left: 76, right: 18, top: "75%", height: "12%" },
       ],
       xAxis: [
         {
@@ -314,6 +395,7 @@ export function Market({
           type: "category" as const,
           data: rows.map((r) => r.time),
           boundaryGap: true,
+          axisLabel: { color: "#78837c", fontSize: 10, hideOverlap: true },
         },
         {
           ...axis,
@@ -324,38 +406,107 @@ export function Market({
         },
       ],
       yAxis: [
-        { ...axis, scale: true, type: "value" as const },
-        { ...axis, type: "value" as const, gridIndex: 1, splitNumber: 2 },
+        {
+          ...axis,
+          scale: true,
+          type: "value",
+          min: prices.min,
+          max: prices.max,
+          name: "价格 / 元",
+          splitNumber: 5,
+          axisLabel: {
+            color: "#78837c",
+            fontSize: 10,
+            formatter: (v: number) => v.toFixed(2),
+          },
+        },
+        {
+          ...axis,
+          type: "value",
+          gridIndex: 1,
+          splitNumber: 2,
+          name: "成交量",
+          axisLabel: {
+            color: "#78837c",
+            fontSize: 10,
+            formatter: (v: number) =>
+              v >= 1e8
+                ? (v / 1e8).toFixed(1) + "亿"
+                : v >= 1e4
+                  ? (v / 1e4).toFixed(0) + "万"
+                  : String(v),
+          },
+        },
       ],
       dataZoom: [
         {
           type: "inside" as const,
+          id: "market-time-inside",
           xAxisIndex: [0, 1],
-          start: Math.max(0, 100 - (120 / Math.max(1, rows.length)) * 100),
+          start: range.start,
+          end: range.end,
+          zoomOnMouseWheel: true,
+          moveOnMouseMove: true,
+          moveOnMouseWheel: "shift",
+          throttle: 50,
+          preventDefaultMouseMove: true,
         },
         {
           type: "slider" as const,
+          id: "market-time",
           xAxisIndex: [0, 1],
-          bottom: 0,
-          height: 18,
+          start: range.start,
+          end: range.end,
+          bottom: 8,
+          left: 76,
+          right: 18,
+          height: 28,
+          handleSize: "110%",
+          moveHandleSize: 8,
+          brushSelect: false,
+          throttle: 50,
+          handleStyle: { color: "#426f53", borderColor: "#426f53" },
+          fillerColor: "rgba(130,165,110,0.18)",
           borderColor: "#e6eae2",
+        },
+        {
+          type: "slider",
+          id: "market-price",
+          yAxisIndex: 0,
+          orient: "vertical",
+          left: 2,
+          top: 30,
+          height: "58%",
+          width: 14,
+          start: vertical.start,
+          end: vertical.end,
+          filterMode: "none",
+          showDataShadow: false,
+          showDetail: false,
+          brushSelect: false,
+          handleSize: "140%",
+          handleStyle: { color: "#426f53" },
+          fillerColor: "rgba(130,165,110,0.16)",
+          throttle: 50,
         },
       ],
       series: [
         mode === "k"
           ? {
               name: "行情",
+              id: "market-price-series",
               type: "candlestick" as const,
               data: rows.map((r) => [r.open, r.close, r.low, r.high]),
               itemStyle: {
-                color: "#e06e64",
-                color0: "#4a9982",
-                borderColor: "#e06e64",
-                borderColor0: "#4a9982",
+                color: RISE,
+                color0: FALL,
+                borderColor: RISE,
+                borderColor0: FALL,
               },
             }
           : {
               name: "收盘价",
+              id: "market-price-series",
               type: "line" as const,
               data: rows.map((r) => r.close),
               symbol: "none",
@@ -363,15 +514,27 @@ export function Market({
             },
         {
           name: "成交量（股）",
+          id: "market-volume-series",
           type: "bar" as const,
           xAxisIndex: 1,
           yAxisIndex: 1,
-          data: rows.map((r) => r.volume),
-          itemStyle: { color: "#cedcd3" },
+          data: rows.map((r, i) => ({
+            value: r.volume,
+            itemStyle: { color: volumeColor(r, rows[i - 1]) },
+          })),
         },
       ],
     }),
-    [data, mode],
+    [
+      data,
+      mode,
+      range.start,
+      range.end,
+      prices.min,
+      prices.max,
+      vertical.start,
+      vertical.end,
+    ],
   );
   return (
     <>
@@ -464,19 +627,190 @@ export function Market({
             <button
               className={interval === value ? "active" : ""}
               key={value}
-              onClick={() => setInterval(value)}
+              onClick={() => {
+                setInterval(value);
+                setWindow(null);
+                resetPrice();
+              }}
             >
               {label}
             </button>
           ))}
-          <span>红涨 · 绿跌</span>
+          <span>K线红阳 · 绿阴</span>
         </div>
+        {rows.length > 0 && (
+          <>
+            <div className="market-toolbar">
+              <label>
+                开始日期
+                <input
+                  type="date"
+                  value={dateStart}
+                  min={rows[0].time.slice(0, 10)}
+                  max={rows.at(-1)!.time.slice(0, 10)}
+                  onChange={(e) => setDateStart(e.target.value)}
+                  onInput={(e) => setDateStart(e.currentTarget.value)}
+                />
+              </label>
+              <label>
+                结束日期
+                <input
+                  type="date"
+                  value={dateEnd}
+                  min={rows[0].time.slice(0, 10)}
+                  max={rows.at(-1)!.time.slice(0, 10)}
+                  onChange={(e) => setDateEnd(e.target.value)}
+                  onInput={(e) => setDateEnd(e.currentTarget.value)}
+                />
+              </label>
+              <button
+                className="secondary"
+                onClick={() => {
+                  const next = rangeForDates(rows, dateStart, dateEnd);
+                  if (next) changeWindow(next);
+                  else
+                    setControlError(
+                      "请选择包含行情记录的有效日期范围，开始日期不能晚于结束日期。",
+                    );
+                }}
+              >
+                应用时间范围
+              </button>
+            </div>
+            <div className="row market-shortcuts">
+              {[30, 90, 365].map((days) => (
+                <button
+                  className="secondary"
+                  key={days}
+                  onClick={() => {
+                    const date = new Date(
+                      rows.at(-1)!.time.slice(0, 10) + "T00:00:00Z",
+                    );
+                    date.setUTCDate(date.getUTCDate() - days + 1);
+                    const next = rangeForDates(
+                      rows,
+                      date.toISOString().slice(0, 10),
+                      rows.at(-1)!.time.slice(0, 10),
+                    );
+                    if (next) changeWindow(next);
+                  }}
+                >
+                  近{days}天
+                </button>
+              ))}
+              <button
+                className="secondary"
+                onClick={() => changeWindow({ start: 0, end: 100 })}
+              >
+                全部历史
+              </button>
+              <button
+                className="secondary"
+                aria-label="放大K线时间范围"
+                title="放大"
+                onClick={() =>
+                  changeWindow(zoomWindow(range, 0.7, rows.length))
+                }
+              >
+                <ZoomIn size={16} />
+              </button>
+              <button
+                className="secondary"
+                aria-label="缩小K线时间范围"
+                title="缩小"
+                onClick={() =>
+                  changeWindow(zoomWindow(range, 1.4, rows.length))
+                }
+              >
+                <ZoomOut size={16} />
+              </button>
+              <button
+                className="secondary"
+                onClick={() => {
+                  changeWindow(recentWindow(rows.length));
+                  resetPrice();
+                }}
+              >
+                <RotateCcw size={14} />
+                重置视图
+              </button>
+            </div>
+            <details className="price-controls">
+              <summary>价格坐标范围 · 自动随可见K线适配，也可手动调整</summary>
+              <div className="market-toolbar">
+                <label>
+                  价格下限（元）
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    placeholder={money(prices.min)}
+                    value={priceMin}
+                    onChange={(e) => setPriceMin(e.target.value)}
+                  />
+                </label>
+                <label>
+                  价格上限（元）
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    placeholder={money(prices.max)}
+                    value={priceMax}
+                    onChange={(e) => setPriceMax(e.target.value)}
+                  />
+                </label>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    const min = Number(priceMin),
+                      max = Number(priceMax);
+                    if (
+                      !priceMin ||
+                      !priceMax ||
+                      !Number.isFinite(min) ||
+                      !Number.isFinite(max) ||
+                      min < 0 ||
+                      max <= min
+                    ) {
+                      setControlError(
+                        "价格上限必须大于下限，且下限不能小于0。",
+                      );
+                      return;
+                    }
+                    setFixedPrices({ min, max });
+                    setVertical({ start: 0, end: 100 });
+                    setControlError("");
+                  }}
+                >
+                  应用价格范围
+                </button>
+                <button className="secondary" onClick={resetPrice}>
+                  恢复价格自动缩放
+                </button>
+              </div>
+            </details>
+            <p className="section-note" aria-live="polite">
+              可见时间：{rows[firstIndex]?.time} — {rows[lastIndex]?.time} ·{" "}
+              {lastIndex - firstIndex + 1}根K线；价格视窗：¥
+              {money(
+                prices.min + ((prices.max - prices.min) * vertical.start) / 100,
+              )}{" "}
+              —{" "}
+              {money(
+                prices.min + ((prices.max - prices.min) * vertical.end) / 100,
+              )}
+              {fixedPrices ? "（手动）" : "（自动基准）"}。
+            </p>
+            {controlError && <p className="error">{controlError}</p>}
+          </>
+        )}
         {error ? (
           <p className="error">{error}</p>
         ) : loading ? (
           <Empty title="正在读取行情" />
         ) : rows.length ? (
-          <Chart option={chart} height={430} />
+          <Chart option={chart} height={540} onZoom={onZoom} preserveSeries />
         ) : (
           <Empty title={stock ? "该周期暂无数据" : "还没有研究股票"}>
             {stock ? (
@@ -487,6 +821,11 @@ export function Market({
               </button>
             )}
           </Empty>
+        )}
+        {rows.length > 0 && (
+          <p className="section-note">
+            滚轮或触控板捏合缩放；按住图内左右拖动，或拖底部横栏移动时间窗口，两端手柄调整跨度。左侧竖栏调整价格轴。成交量按收盘对比上一周期收盘：红涨、绿跌、灰平，首根对比开盘。
+          </p>
         )}
       </section>
       <div className="notice">

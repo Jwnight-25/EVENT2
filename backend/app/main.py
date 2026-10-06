@@ -398,6 +398,13 @@ def models(
     return response
 
 
+@app.get(API_PREFIX + "/model-families")
+def family_catalog():
+    from .model_catalog import model_families
+
+    return model_families()
+
+
 @app.get(API_PREFIX + "/models/{identifier}/diagnostics")
 def diagnostics(identifier: str, db: DB):
     return require(db.get(Model, identifier)).diagnostics

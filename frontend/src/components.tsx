@@ -10,6 +10,7 @@ import {
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import type { EChartsOption } from "echarts";
+import type { EChartsType } from "echarts/core";
 import { LoaderCircle, X, FileSearch } from "lucide-react";
 import { api, post, statusText, type Job } from "./api";
 
@@ -27,21 +28,39 @@ echarts.use([
 export function Chart({
   option,
   height = 350,
+  onZoom,
+  preserveSeries = false,
 }: {
   option: EChartsOption;
   height?: number;
+  onZoom?: (ranges: ChartZoom[]) => void;
+  preserveSeries?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const instance = useRef<EChartsType | null>(null);
+  const zoomCallback = useRef(onZoom);
+  zoomCallback.current = onZoom;
   useEffect(() => {
     const chart = echarts.init(ref.current!);
-    chart.setOption(option);
+    instance.current = chart;
+    chart.on("datazoom", () => {
+      const state = chart.getOption() as { dataZoom?: ChartZoom[] };
+      zoomCallback.current?.(state.dataZoom || []);
+    });
     const observer = new ResizeObserver(() => chart.resize());
     observer.observe(ref.current!);
     return () => {
       observer.disconnect();
       chart.dispose();
+      instance.current = null;
     };
-  }, [option]);
+  }, []);
+  useEffect(() => {
+    instance.current?.setOption(option, {
+      replaceMerge: preserveSeries ? [] : ["series"],
+      lazyUpdate: false,
+    });
+  }, [option, preserveSeries]);
   return (
     <div
       ref={ref}
@@ -51,6 +70,13 @@ export function Chart({
     />
   );
 }
+export type ChartZoom = {
+  id?: string;
+  start: number;
+  end: number;
+  startValue?: string | number;
+  endValue?: string | number;
+};
 export const axis = {
   axisLine: { lineStyle: { color: "#dde3dd" } },
   axisLabel: { color: "#78837c", fontSize: 11 },

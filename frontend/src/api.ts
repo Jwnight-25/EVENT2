@@ -37,6 +37,13 @@ export type Model = {
   created_at: string;
   run_id: string;
 };
+export type ModelFamily = {
+  id: string;
+  name: string;
+  available: boolean;
+  missing_dependencies: string[];
+  message: string;
+};
 export type Prediction = {
   id: string;
   horizon: string;

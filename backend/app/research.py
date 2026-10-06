@@ -500,6 +500,11 @@ def load_artifact(model):
     return joblib.load(path)
 
 
+def nominate_families(family_best, mode):
+    ordered = sorted([f for f in family_best if f != "naive"], key=lambda f: family_best[f]["score"])
+    return ordered if mode == "research" else ordered[:3]
+
+
 def train_job(job_id):
     from .assessment import assess_models, CHECK_LABELS
 
@@ -629,7 +634,7 @@ def train_job(job_id):
             report["horizons"][horizon] = {"status": "failed", "message": "基准评估失败"}
             continue
         base_score = family_best["naive"]["score"]
-        nominees = sorted([f for f in family_best if f != "naive"], key=lambda f: family_best[f]["score"])[:3]
+        nominees = nominate_families(family_best, mode)
         # Nominees are fixed BEFORE looking at the final test.
         results = {}
         local_models = []

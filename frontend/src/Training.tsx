@@ -10,6 +10,7 @@ import {
   probability,
   type Stock,
   type Model,
+  type ModelFamily,
 } from "./api";
 import { Chart, Empty, JobPanel, axis, useLoad } from "./components";
 import type { EChartsOption } from "echarts";
@@ -47,6 +48,10 @@ export function Training({
   const [job, setJob] = useState(localStorage.getItem(storageKey) || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const { data: catalog } = useLoad(
+    () => api<ModelFamily[]>("/model-families"),
+    [],
+  );
   const { data: runs } = useLoad(
     () =>
       stock
@@ -82,6 +87,63 @@ export function Training({
     [stock?.id, basis, horizon, viewedRun?.id, version],
   );
   const current = models?.find((m) => m.id === modelId) || models?.[0];
+  const baseline = models?.find((m) => m.family === "naive");
+  const policy = viewedRun?.report.policy;
+  const validationGain =
+    current && baseline
+      ? (current.metrics.validation_improvement ??
+        (baseline.metrics.validation.mae > 1e-8
+          ? 1 - current.metrics.validation.mae / baseline.metrics.validation.mae
+          : 0))
+      : undefined;
+  const windowRatios =
+    current?.metrics.validation.windows?.map((w: any, i: number) => {
+      const base = baseline?.metrics.validation.windows?.[i]?.mae;
+      return typeof base === "number" && base > 1e-8
+        ? w.mae / base
+        : w.mae <= 1e-8
+          ? 1
+          : Infinity;
+    }) || [];
+  const acceptanceRows = current
+    ? [
+        [
+          "验证MAE改善",
+          pct(validationGain),
+          "至少 " + pct(policy?.min_improvement ?? 0.02),
+          "validation_improvement",
+        ],
+        [
+          "最终评估MAE改善",
+          pct(current.metrics.improvement),
+          "至少 " + pct(policy?.min_improvement ?? 0.02),
+          "test_improvement",
+        ],
+        [
+          "最差验证窗口误差 / 基准",
+          score(Math.max(...windowRatios)),
+          "不超过 1.10",
+          "stable_windows",
+        ],
+        [
+          "实际覆盖率",
+          pct(current.metrics.test.coverage),
+          "至少 " + pct(policy?.min_coverage ?? 0.75),
+          "coverage",
+        ],
+        [
+          "区间宽度 / 基准",
+          baseline && baseline.metrics.test.mean_width > 1e-10
+            ? score(
+                current.metrics.test.mean_width /
+                  baseline.metrics.test.mean_width,
+              )
+            : "—",
+          "不超过 1.25",
+          "interval_width",
+        ],
+      ]
+    : [];
   const { data: allDiagnostics } = useLoad(
     () =>
       current
@@ -332,6 +394,9 @@ export function Training({
               <input
                 type="checkbox"
                 checked={families.includes(value)}
+                disabled={
+                  catalog?.find((f) => f.id === value)?.available === false
+                }
                 onChange={(e) =>
                   setFamilies(
                     e.target.checked
@@ -341,9 +406,17 @@ export function Training({
                 }
               />
               {label}
+              {catalog?.find((f) => f.id === value)?.available === false &&
+                " · 依赖未安装"}
             </label>
           ))}
         </div>
+        <p className="note-box">
+          模型类型是算法选项，参数试验是同类算法的不同设置，保存版本是训练成功的产物。当前有
+          {catalog?.filter((f) => f.available && f.id !== "naive").length ??
+            "…"}
+          类模型的依赖已安装。每类保留滚动验证最佳参数；研究模式保存所有成功类型，独立验收先固定最多三个候选。缺少依赖的选项暂不可训练。
+        </p>
         <p className="section-note">
           基准始终参与比较。时限涵盖所选周期的调参、校准和评估；延长时间需同时增加试验次数才会探索更多参数。研究模式可反复修改设置，其结果不作为新的独立测试，也不会替换已入选模型。缺少可选依赖会记录失败。
         </p>
@@ -460,7 +533,9 @@ export function Training({
                             : m.family === "naive"
                               ? "比较基准"
                               : m.metrics.evaluation_mode === "research"
-                                ? "研究模型"
+                                ? m.metrics.passes_thresholds
+                                  ? "研究达标 · 待独立验收"
+                                  : "研究未达标"
                                 : "未入选"}
                         </span>
                         <small
@@ -528,6 +603,60 @@ export function Training({
             {current.metrics.test.sample_count}；名义覆盖率：
             {pct(current.metrics.nominal_coverage)}。
           </p>
+          {current.family !== "naive" && (
+            <>
+              <h3 style={{ margin: "18px 0 10px" }}>验收条件逐项核对</h3>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>验收条件</th>
+                      <th>实际数值</th>
+                      <th>规则门槛</th>
+                      <th>结果</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {acceptanceRows.map(([name, value, threshold, key]) => (
+                      <tr key={key}>
+                        <td>{name}</td>
+                        <td>{value}</td>
+                        <td>{threshold}</td>
+                        <td
+                          className={
+                            current.metrics.acceptance_checks?.[key]
+                              ? "acceptance-pass"
+                              : "acceptance-fail"
+                          }
+                        >
+                          {current.metrics.acceptance_checks?.[key]
+                            ? "通过"
+                            : "未通过"}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td>评估数据独立性</td>
+                      <td>
+                        {researchResult ? "重复历史研究" : "本版本一次性验收"}
+                      </td>
+                      <td>独立验收才可入选</td>
+                      <td
+                        className={
+                          researchResult ? "acceptance-fail" : "acceptance-pass"
+                        }
+                      >
+                        {researchResult ? "待新数据验证" : "符合当前流程"}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p className="section-note">
+                五项误差和区间门槛全部通过，且属于独立验收，才标为“已入选”。研究达标表示通过工程门槛，仍需新的未使用数据；统计优势及可靠性另看下方检验，不能由入选标签保证。
+              </p>
+            </>
+          )}
           <div className="table-wrap">
             <table>
               <thead>

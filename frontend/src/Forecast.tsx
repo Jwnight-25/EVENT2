@@ -12,6 +12,7 @@ import {
   type Prediction,
 } from "./api";
 import { Chart, Empty, JobPanel, axis, useLoad } from "./components";
+import { summarizePath, type ForecastPoint } from "./forecastSummary";
 
 export function Forecast({
   stock,
@@ -201,6 +202,8 @@ export function Forecast({
     result?.models?.find((m: any) => m.model_id === resultModelId) ||
     result?.models?.[0];
   const endpoint = first?.points?.at(-1);
+  const baseClose = result?.history?.at(-1)?.close || result?.reference_price;
+  const pathSummary = summarizePath(first?.points || [], baseClose || 0);
   return (
     <>
       <div className="page-heading">
@@ -375,6 +378,108 @@ export function Forecast({
               </p>
             </aside>
           </div>
+          {pathSummary && (
+            <section className="card">
+              <div className="card-heading">
+                <div>
+                  <h2>价格预测文字与逐日数据 · {first.family}</h2>
+                  <p>
+                    模型版本 {first.model_id.slice(0, 8)} ·{" "}
+                    {first.points.length}个交易日 · 金额单位：元
+                  </p>
+                </div>
+                <select
+                  aria-label="文字与表格模型"
+                  value={first.model_id}
+                  onChange={(e) => setResultModelId(e.target.value)}
+                >
+                  {result.models.map((m: any) => (
+                    <option key={m.model_id} value={m.model_id}>
+                      {m.family} · {m.model_id.slice(0, 6)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="forecast-narrative">
+                点估计走势为<strong>{pathSummary.trend}</strong>
+                ：由最新实际收盘价 ¥{money(baseClose)}，变化至 {endpoint.date}{" "}
+                的 ¥{money(endpoint.estimate)}（{pct(pathSummary.change)}
+                ）。期末收盘边际预测区间为
+                <strong>
+                  {" "}
+                  ¥{money(endpoint.lower)} — ¥{money(endpoint.upper)}
+                </strong>
+                。
+              </p>
+              {first.points.length > 1 && (
+                <>
+                  <p className="forecast-narrative">
+                    预测路径中的收盘点估计最低为 ¥
+                    {money(pathSummary.trough.estimate)}（
+                    {pathSummary.trough.date}），最高为 ¥
+                    {money(pathSummary.peak.estimate)}（{pathSummary.peak.date}
+                    ）。各日区间下沿最小值为 ¥{money(pathSummary.envelopeLow)}
+                    ，上沿最大值为 ¥{money(pathSummary.envelopeHigh)}。
+                  </p>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>走势阶段</th>
+                          <th>日期范围</th>
+                          <th>阶段末点估计</th>
+                          <th>阶段变化</th>
+                          <th>描述</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pathSummary.stages.map((stage, i) => (
+                          <tr key={stage.end}>
+                            <td>第{i + 1}阶段</td>
+                            <td>
+                              {stage.start} — {stage.end}
+                            </td>
+                            <td>{money(stage.estimate)}</td>
+                            <td>{pct(stage.change)}</td>
+                            <td>{stage.trend}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+              <p className="section-note">
+                走势文字由已保存的模型数字计算，按区段变化超过±1%区分偏上行、偏下行，其余为小幅波动；不依赖AI。收盘点估计的高低值不是期间实际最高/最低价，区间包络也不是全路径覆盖保证。
+              </p>
+              <div className="table-wrap forecast-data">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>交易日</th>
+                      <th>收盘点估计</th>
+                      <th>区间下沿</th>
+                      <th>区间上沿</th>
+                      <th>区间宽度</th>
+                      <th>较最新收盘</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {first.points.map((p: ForecastPoint) => (
+                      <tr key={p.date}>
+                        <td>{p.date}</td>
+                        <td>{money(p.estimate)}</td>
+                        <td>{money(p.lower)}</td>
+                        <td>{money(p.upper)}</td>
+                        <td>{money(p.upper - p.lower)}</td>
+                        <td>{pct(p.estimate / baseClose - 1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
           {first.candle && (
             <section className="card">
               <h2>下一交易日预测K线</h2>
