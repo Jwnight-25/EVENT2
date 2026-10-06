@@ -1,0 +1,4 @@
+# Only the build tool's required native-binary installer is permitted.
+allowBuilds:
+  esbuild: true
+strictDepBuilds: true
