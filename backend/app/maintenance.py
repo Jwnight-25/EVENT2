@@ -20,7 +20,7 @@ def backup_list():
     if not BACKUP_DIR.exists():
         return []
     results = []
-    for path in sorted(BACKUP_DIR.glob("*/manifest.json"), reverse=True)[:20]:
+    for path in BACKUP_DIR.glob("*/manifest.json"):
         try:
             manifest = json.loads(path.read_text())
             results.append(
@@ -33,7 +33,7 @@ def backup_list():
             )
         except (ValueError, KeyError):
             continue
-    return results
+    return sorted(results, key=lambda item: item["created_at"], reverse=True)[:20]
 
 
 def data_status(db, stock_id, basis):
