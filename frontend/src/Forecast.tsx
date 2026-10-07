@@ -11,7 +11,17 @@ import {
   type Model,
   type Prediction,
 } from "./api";
-import { Chart, Empty, JobPanel, axis, useLoad } from "./components";
+import {
+  Chart,
+  Empty,
+  JobPanel,
+  axis,
+  useLoad,
+  type ChartZoom,
+} from "./components";
+import { TimeScrollbar } from "./TimeScrollbar";
+import { forecastPlot } from "./forecastPlot";
+import { recentWindow, visibleIndices, type WindowRange } from "./chartUtils";
 import { summarizePath, type ForecastPoint } from "./forecastSummary";
 
 export function Forecast({
@@ -37,6 +47,10 @@ export function Forecast({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [predictionId, setPredictionId] = useState("");
+  const [plotWindow, setPlotWindow] = useState<{
+    id: string;
+    range: WindowRange;
+  } | null>(null);
   const {
     data: models,
     error: modelError,
@@ -96,85 +110,93 @@ export function Forecast({
       .map((m) => m.id) || [];
   const activeIds = selected ?? defaults;
   const result = prediction?.result;
-  const colors = ["#477956", "#a38b59", "#7e83a1"];
+  const plot = useMemo(() => forecastPlot(result), [result]);
+  const plotRange =
+    plotWindow && plotWindow.id === prediction?.id
+      ? plotWindow.range
+      : recentWindow(plot.dates.length, 30 + plot.futureCount);
+  function changePlotWindow(range: WindowRange) {
+    setPlotWindow({ id: prediction?.id || "", range });
+  }
+  function onPlotZoom(ranges: ChartZoom[]) {
+    const zoom = ranges.find((r) => r.id === "forecast-time-inside");
+    if (zoom) changePlotWindow({ start: zoom.start, end: zoom.end });
+  }
+  const [plotFirst, plotLast] = visibleIndices(plot.dates.length, plotRange);
   const chart = useMemo<EChartsOption>(() => {
-    const historical = result?.history || [];
-    const forecasts = result?.models || [];
-    const dates = [
-      ...historical.map((r: any) => r.time),
-      ...(forecasts[0]?.points || []).map((p: any) => p.date),
-    ];
-    const series: SeriesOption[] = [
-      {
-        name: "历史收盘",
-        type: "line",
-        data: [
-          ...historical.map((r: any) => r.close),
-          ...Array(forecasts[0]?.points.length || 0).fill(null),
-        ],
-        symbol: "none",
-        lineStyle: { color: "#304e3b", width: 2 },
-      },
-    ];
-    forecasts.forEach((m: any, i: number) => {
-      const prefix = Array(historical.length).fill(null);
-      series.push({
-        name: m.family,
-        type: "line",
-        data: [
-          ...prefix.slice(1),
-          historical.at(-1)?.close,
-          ...m.points.map((p: any) => p.estimate),
-        ],
-        symbol: "none",
-        lineStyle: { color: colors[i], type: "dashed", width: 2 },
-      });
-      series.push({
-        name: m.family + "区间下沿",
-        type: "line",
-        stack: "band-" + i,
-        data: [...prefix, ...m.points.map((p: any) => p.lower)],
-        symbol: "none",
-        lineStyle: { opacity: 0 },
-        areaStyle: { opacity: 0 },
-        emphasis: { disabled: true },
-      });
-      series.push({
-        name: m.family + "区间宽度",
-        type: "line",
-        stack: "band-" + i,
-        data: [...prefix, ...m.points.map((p: any) => p.upper - p.lower)],
-        symbol: "none",
-        lineStyle: { opacity: 0 },
-        areaStyle: { color: colors[i], opacity: 0.15 },
-        emphasis: { disabled: true },
-      });
-    });
-    const actual = prediction?.actual_bars || [];
-    if (actual.length > 1) {
+    const series: SeriesOption[] = [...plot.series];
+    const futureDates = new Set(plot.dates.slice(result?.history?.length || 0));
+    const actual = (prediction?.actual_bars || []).filter((r) =>
+      futureDates.has(r.time),
+    );
+    if (actual.length) {
       const byDate = Object.fromEntries(actual.map((r) => [r.time, r.close]));
       series.push({
+        id: "forecast-actual",
         name: "后续实际",
         type: "line",
-        data: dates.map((d) => byDate[d] ?? null),
-        symbol: "none",
+        data: plot.dates.map((d) => byDate[d] ?? null),
+        symbol: "circle",
+        symbolSize: 5,
         lineStyle: { color: "#c46b58", width: 2 },
+        itemStyle: { color: "#c46b58" },
       });
     }
     return {
-      tooltip: { trigger: "axis" },
+      animation: false,
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        formatter: (params: any) => {
+          const date = (Array.isArray(params) ? params[0] : params)?.axisValue;
+          const historical = result?.history?.find((r: any) => r.time === date);
+          const lines = [date];
+          if (historical) lines.push(`历史收盘：¥${money(historical.close)}`);
+          for (const m of result?.models || []) {
+            const point = m.points.find((p: any) => p.date === date);
+            if (point)
+              lines.push(
+                `${m.family}：¥${money(point.estimate)}<br/>区间：¥${money(point.lower)} — ¥${money(point.upper)}`,
+              );
+          }
+          const observed = actual.find((r) => r.time === date);
+          if (observed) lines.push(`后续实际：¥${money(observed.close)}`);
+          return lines.join("<br/>");
+        },
+      },
       legend: {
         bottom: 0,
-        data: ["历史收盘", ...forecasts.map((m: any) => m.family), "后续实际"],
+        data: [
+          "历史收盘",
+          ...(result?.models || []).map((m: any) => m.family),
+          ...(actual.length ? ["后续实际"] : []),
+        ],
         textStyle: { fontSize: 11, color: "#7c8a73" },
       },
-      grid: { left: 55, right: 20, top: 25, bottom: 70 },
-      xAxis: { ...axis, type: "category", data: dates },
+      grid: { left: 55, right: 55, top: 35, bottom: 55 },
+      xAxis: {
+        ...axis,
+        type: "category",
+        data: plot.dates,
+        boundaryGap: true,
+        axisLabel: { ...axis.axisLabel, hideOverlap: true },
+      },
       yAxis: { ...axis, type: "value", scale: true },
-      dataZoom: [{ type: "inside", start: 20 }],
+      dataZoom: [
+        {
+          id: "forecast-time-inside",
+          type: "inside",
+          start: plotRange.start,
+          end: plotRange.end,
+          zoomOnMouseWheel: true,
+          moveOnMouseMove: true,
+          moveOnMouseWheel: "shift",
+          throttle: 50,
+        },
+      ],
       series,
     };
-  }, [prediction]);
+  }, [plot, prediction, plotRange.start, plotRange.end]);
   async function start() {
     if (!stock) return;
     setBusy(true);
@@ -350,7 +372,46 @@ export function Forecast({
                   </p>
                 </div>
               </div>
-              <Chart option={chart} height={390} />
+              <Chart
+                key={prediction?.id}
+                option={chart}
+                height={390}
+                onZoom={onPlotZoom}
+                preserveSeries
+              />
+              <TimeScrollbar
+                dates={plot.dates}
+                range={plotRange}
+                onChange={changePlotWindow}
+                label="预测时间滑条"
+              />
+              <div className="row forecast-chart-controls">
+                <button
+                  className="text-btn"
+                  onClick={() =>
+                    changePlotWindow(
+                      recentWindow(plot.dates.length, 30 + plot.futureCount),
+                    )
+                  }
+                >
+                  定位预测区段
+                </button>
+                <button
+                  className="text-btn"
+                  onClick={() => changePlotWindow({ start: 0, end: 100 })}
+                >
+                  全部时间
+                </button>
+                <span className="muted">
+                  可见 {plotLast - plotFirst + 1} 个时间点 · 预测{" "}
+                  {plot.futureCount} 个交易日
+                </span>
+              </div>
+              {plot.futureCount === 1 && (
+                <p className="section-note">
+                  下一交易日只有一个预测点：彩色圆点为收盘估计，竖线为价格区间，虚线从最新实际收盘连接至该预测点。
+                </p>
+              )}
               <p className="section-note">
                 每个日期的区间分别校准，不代表全路径保证覆盖。20/60交易日为实验跨度。
                 {result.warnings?.join("；")}。

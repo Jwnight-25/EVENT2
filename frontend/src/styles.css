@@ -58,29 +58,80 @@
   color: #a65446;
 }
 
-.time-scrollbar {
-  margin: 4px 0 14px;
-  padding: 14px 16px;
-  border-radius: 10px;
-  background: #f4f7ee;
+.chart-scrollbar {
+  margin: 0 18px 12px var(--scrollbar-inset);
 }
-.time-scrollbar label {
-  display: block;
-  font-size: 12px;
-  color: #59705d;
+.chart-scrollbar-track {
+  display: flex;
+  align-items: center;
+  height: 20px;
+  gap: 3px;
 }
-.time-scrollbar input[type="range"] {
-  width: 100%;
-  height: 32px;
+.scrollbar-arrow {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 16px;
   padding: 0;
-  margin: 7px 0;
-  accent-color: #426f53;
+  border-radius: 3px;
+  background: #edf0eb;
+  color: #596c60;
+}
+.chart-scrollbar input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: #edf0eb;
   cursor: ew-resize;
 }
-.time-scrollbar .row {
-  justify-content: space-between;
+.chart-scrollbar input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: clamp(28px, var(--scrollbar-thumb), 100%);
+  height: 12px;
+  border: 1px solid #879a8d;
+  border-radius: 4px;
+  background: #a2b1a7;
+}
+.chart-scrollbar input[type="range"]::-moz-range-thumb {
+  width: clamp(28px, var(--scrollbar-thumb), 100%);
+  height: 10px;
+  border: 1px solid #879a8d;
+  border-radius: 4px;
+  background: #a2b1a7;
+}
+.chart-scrollbar input[type="range"]:focus-visible {
+  outline: 2px solid #426f53;
+  outline-offset: 3px;
+}
+.chart-scrollbar input[type="range"]:disabled {
+  opacity: 0.5;
+}
+.chart-scrollbar-caption {
+  display: flex;
   flex-wrap: wrap;
-  font-size: 11px;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: #7b897d;
+}
+.forecast-chart-controls {
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+.participation-summary {
+  margin: 14px 0 18px;
+}
+.participation-summary td {
+  white-space: normal;
 }
 * {
   box-sizing: border-box;

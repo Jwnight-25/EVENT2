@@ -14,6 +14,7 @@ import {
 } from "./api";
 import { Chart, Empty, JobPanel, axis, useLoad } from "./components";
 import type { EChartsOption } from "echarts";
+import { trainingParticipation } from "./trainingParticipation";
 
 export function Training({
   stock,
@@ -28,7 +29,7 @@ export function Training({
 }) {
   const [diagnosticTarget, setDiagnosticTarget] = useState("");
   const [horizon, setHorizon] = useState("next_day");
-  const [families, setFamilies] = useState(["arima", "ridge"]);
+  const [families, setFamilies] = useState(["arima", "ridge", "sarima"]);
   const [trials, setTrials] = useState(6);
   const [budget, setBudget] = useState(1800);
   const [mode, setMode] = useState("cross_validation");
@@ -93,6 +94,22 @@ export function Training({
         : Promise.resolve([]),
     [stock?.id, basis, horizon, viewedRun?.id, version],
   );
+  const participation =
+    runDetail && models
+      ? trainingParticipation(
+          viewedRun?.config.families || [],
+          horizon,
+          runDetail.trials || [],
+          models.map((m) => m.family),
+        )
+      : [];
+  const omittedFamilies =
+    catalog?.filter(
+      (f) =>
+        f.available &&
+        f.id !== "naive" &&
+        !viewedRun?.config.families?.includes(f.id),
+    ) || [];
   const current = models?.find((m) => m.id === modelId) || models?.[0];
   const baseline = models?.find((m) => m.family === "naive");
   const policy = viewedRun?.report.policy;
@@ -532,6 +549,48 @@ export function Training({
           </select>
         </div>
         {loadError && <p className="error">{loadError}</p>}
+        {viewedRun && (
+          <div className="participation-summary">
+            <p className="section-note">
+              本实验勾选：{viewedRun.config.families?.join("、") || "未记录"}。
+              对比图只显示成功保存的版本，naive 为自动加入的比较基准。
+              {omittedFamilies.length > 0 &&
+                `本次未勾选：${omittedFamilies.map((f) => f.id).join("、")}。`}
+            </p>
+            {participation.length > 0 && (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>参与模型</th>
+                      <th>参数试验</th>
+                      <th>成功 / 失败</th>
+                      <th>本周期结果</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {participation.map((p) => (
+                      <tr key={p.family}>
+                        <td>{p.family}</td>
+                        <td>{p.trials}</td>
+                        <td>
+                          {p.succeeded} / {p.failed}
+                        </td>
+                        <td
+                          className={
+                            p.saved ? "acceptance-pass" : "acceptance-fail"
+                          }
+                        >
+                          {p.reason}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
         {models?.length ? (
           <>
             <Chart option={comparison} height={250} />

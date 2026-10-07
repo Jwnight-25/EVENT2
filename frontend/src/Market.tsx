@@ -18,6 +18,7 @@ import {
   type ChartZoom,
 } from "./components";
 import type { EChartsOption } from "echarts";
+import { TimeScrollbar } from "./TimeScrollbar";
 import {
   FALL,
   RISE,
@@ -27,7 +28,6 @@ import {
   recentWindow,
   visibleIndices,
   zoomWindow,
-  panWindow,
   type WindowRange,
 } from "./chartUtils";
 
@@ -384,7 +384,7 @@ export function Market({
       axisPointer: { link: [{ xAxisIndex: "all" as const }] },
       grid: [
         { left: 76, right: 18, top: 30, height: "58%" },
-        { left: 76, right: 18, top: "75%", height: "12%" },
+        { left: 76, right: 18, top: "78%", height: "19%" },
       ],
       xAxis: [
         {
@@ -753,7 +753,7 @@ export function Market({
         ) : loading ? (
           <Empty title="正在读取行情" />
         ) : rows.length ? (
-          <Chart option={chart} height={540} onZoom={onZoom} preserveSeries />
+          <Chart option={chart} height={510} onZoom={onZoom} preserveSeries />
         ) : (
           <Empty title={stock ? "该周期暂无数据" : "还没有研究股票"}>
             {stock ? (
@@ -767,61 +767,13 @@ export function Market({
         )}
         {rows.length > 0 && (
           <>
-            <div className="time-scrollbar">
-              <label>
-                横向时间滑条 · 保持当前K线跨度
-                <input
-                  type="range"
-                  aria-label="横向时间滑条"
-                  min={0}
-                  max={Math.max(0, rows.length - (lastIndex - firstIndex + 1))}
-                  step={1}
-                  value={firstIndex}
-                  disabled={lastIndex - firstIndex + 1 >= rows.length}
-                  onChange={(e) =>
-                    changeWindow(
-                      panWindow(rows.length, range, Number(e.target.value)),
-                    )
-                  }
-                />
-              </label>
-              <div className="row">
-                <button
-                  className="secondary"
-                  disabled={firstIndex === 0}
-                  onClick={() =>
-                    changeWindow(
-                      panWindow(
-                        rows.length,
-                        range,
-                        firstIndex - (lastIndex - firstIndex + 1),
-                      ),
-                    )
-                  }
-                >
-                  前一窗口
-                </button>
-                <span className="muted">
-                  {rows[0]?.time.slice(0, 10)} —{" "}
-                  {rows.at(-1)?.time.slice(0, 10)}
-                </span>
-                <button
-                  className="secondary"
-                  disabled={lastIndex === rows.length - 1}
-                  onClick={() =>
-                    changeWindow(
-                      panWindow(
-                        rows.length,
-                        range,
-                        firstIndex + (lastIndex - firstIndex + 1),
-                      ),
-                    )
-                  }
-                >
-                  后一窗口
-                </button>
-              </div>
-            </div>
+            <TimeScrollbar
+              dates={rows.map((r) => r.time)}
+              range={range}
+              onChange={changeWindow}
+              label="K线时间滑条"
+              inset={76}
+            />
             <p className="section-note">
               拖动横向时间滑条查看前后行情，或按住图内左右拖动；滚轮与放大缩小按钮调整时间跨度。价格轴自动适配，也可填写上下限。成交量按收盘对比上一周期收盘：红涨、绿跌、灰平，首根对比开盘。
             </p>

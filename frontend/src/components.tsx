@@ -7,6 +7,8 @@ import {
   LegendComponent,
   DataZoomComponent,
   AxisPointerComponent,
+  MarkLineComponent,
+  MarkPointComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import type { EChartsOption } from "echarts";
@@ -23,6 +25,8 @@ echarts.use([
   LegendComponent,
   DataZoomComponent,
   AxisPointerComponent,
+  MarkLineComponent,
+  MarkPointComponent,
   CanvasRenderer,
 ]);
 export function Chart({

@@ -13,6 +13,8 @@ import {
   priceBounds,
   panWindow,
 } from "../src/chartUtils.ts";
+import { forecastPlot } from "../src/forecastPlot.ts";
+import { trainingParticipation } from "../src/trainingParticipation.ts";
 import { summarizePath } from "../src/forecastSummary.ts";
 
 const bar = (time: string, close = 10, open = 9) => ({
@@ -116,4 +118,117 @@ test("one-day, exactly one-percent, and empty forecast inputs are handled explic
   assert.equal(result.stages.length, 1);
   assert.equal(summarizePath([], 100), null);
   assert.equal(summarizePath([point], 0), null);
+});
+
+test("single-day forecast retains the real endpoint, an anchor, and visible interval marks", () => {
+  const history = Array.from({ length: 120 }, (_, i) => ({
+    time: `history-${i}`,
+    close: 40,
+  }));
+  const plot = forecastPlot({
+    history,
+    models: [
+      {
+        family: "ridge",
+        model_id: "r1",
+        points: [
+          { date: "2026-10-08", estimate: 41.29, lower: 40.56, upper: 42.04 },
+        ],
+      },
+    ],
+  });
+  assert.equal(plot.futureCount, 1);
+  const line: any = plot.series.find((s: any) => s.id === "forecast-line-r1");
+  assert.deepEqual(line.data.slice(-2), [40, 41.29]);
+  assert.equal(line.data.filter((v: any) => v !== null).length, 2);
+  assert.equal(line.symbol, "circle");
+  assert.deepEqual(line.markPoint.data[0].coord, ["2026-10-08", 41.29]);
+  assert.deepEqual(
+    line.markLine.data[0].map((p: any) => p.coord),
+    [
+      ["2026-10-08", 40.56],
+      ["2026-10-08", 42.04],
+    ],
+  );
+  const lower: any = plot.series.find((s: any) => s.id === "forecast-lower-r1");
+  const width: any = plot.series.find((s: any) => s.id === "forecast-width-r1");
+  assert.equal(lower.data.at(-1) + width.data.at(-1), 42.04);
+  assert.deepEqual(
+    visibleIndices(plot.dates.length, recentWindow(plot.dates.length, 31)),
+    [90, 120],
+  );
+});
+
+test("different models align by prediction date without inventing values or losing later dates", () => {
+  const plot = forecastPlot({
+    history: [{ time: "2026-01-01", close: 10 }],
+    models: [
+      {
+        model_id: "r",
+        family: "ridge",
+        points: [{ date: "2026-01-02", estimate: 11, lower: 9, upper: 12 }],
+      },
+      {
+        model_id: "s",
+        family: "sarima",
+        points: [
+          { date: "2026-01-02", estimate: 10.5, lower: 9, upper: 12 },
+          { date: "2026-01-03", estimate: 12, lower: 10, upper: 13 },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(plot.dates, ["2026-01-01", "2026-01-02", "2026-01-03"]);
+  const ridge: any = plot.series.find((s: any) => s.id === "forecast-line-r");
+  const sarima: any = plot.series.find((s: any) => s.id === "forecast-line-s");
+  assert.deepEqual(ridge.data, [10, 11, null]);
+  assert.deepEqual(sarima.data, [10, 10.5, 12]);
+  assert.notEqual(ridge.lineStyle.color, sarima.lineStyle.color);
+});
+
+test("participation distinguishes parameter successes from a later failed evaluation", () => {
+  const summary = trainingParticipation(
+    ["arima", "ridge"],
+    "one_month",
+    [
+      {
+        family: "arima",
+        horizon: "one_month",
+        status: "succeeded",
+        report: {},
+      },
+      {
+        family: "arima",
+        horizon: "one_month",
+        status: "failed",
+        report: { error: "parameter fit" },
+      },
+      {
+        family: "arima",
+        horizon: "one_month",
+        status: "failed",
+        report: { phase: "acceptance", error: "not converged" },
+      },
+      {
+        family: "ridge",
+        horizon: "one_month",
+        status: "succeeded",
+        report: {},
+      },
+      { family: "arima", horizon: "next_day", status: "succeeded", report: {} },
+    ],
+    ["ridge", "naive"],
+  );
+  assert.deepEqual(
+    summary.map((p) => [p.family, p.trials, p.succeeded, p.failed, p.saved]),
+    [
+      ["arima", 2, 1, 1, false],
+      ["ridge", 1, 1, 0, true],
+    ],
+  );
+  assert.match(summary[0].reason, /not converged/);
+  assert.equal(
+    summary.some((p) => p.family === "sarima"),
+    false,
+  );
 });
