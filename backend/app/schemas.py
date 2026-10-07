@@ -62,3 +62,38 @@ class PredictionRequest(SnapshotRequest):
     allow_unvalidated: bool = False
     reference_price: float | None = Field(default=None, gt=0)
     observation_start: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class AISettingsRequest(StrictRequest):
+    provider: Literal["openai", "compatible"]
+    base_url: str = Field(default="https://api.openai.com/v1", max_length=500)
+    model: str = Field(min_length=1, max_length=100)
+    api_key: str | None = Field(default=None, max_length=500)
+    web_search: bool = True
+
+
+PreferenceField = Literal[
+    "holding_period",
+    "trading_style",
+    "entry_style",
+    "exit_style",
+    "risk_tolerance",
+    "max_drawdown",
+    "position_preference",
+]
+
+
+class PreferenceRequest(StrictRequest):
+    field: PreferenceField
+    value: str = Field(min_length=1, max_length=500)
+
+
+class ConversationRequest(StrictRequest):
+    stock_id: str
+
+
+class AdviceRequest(StrictRequest):
+    text: str = Field(min_length=1, max_length=4000)
+    client_key: str = Field(min_length=1, max_length=100)
+    prediction_id: str | None = None
+    learn_preferences: bool = True

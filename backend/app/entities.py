@@ -137,3 +137,37 @@ class CalendarDay(Base):
     date: Mapped[str] = mapped_column(String(10), primary_key=True)
     is_open: Mapped[bool] = mapped_column(Boolean)
     source: Mapped[str] = mapped_column(String(200))
+
+
+class AdviceConversation(Record, Base):
+    __tablename__ = "advice_conversations"
+    stock_id: Mapped[str] = mapped_column(ForeignKey("stocks.id"), index=True)
+    title: Mapped[str] = mapped_column(String(100))
+    updated_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class AdviceMessage(Record, Base):
+    __tablename__ = "advice_messages"
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("advice_conversations.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    text: Mapped[str] = mapped_column(String(30000))
+    prediction_id: Mapped[str | None] = mapped_column(ForeignKey("predictions.id"), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), nullable=True)
+    client_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reply_to_id: Mapped[str | None] = mapped_column(
+        ForeignKey("advice_messages.id"), nullable=True, unique=True
+    )
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    __table_args__ = (UniqueConstraint("conversation_id", "client_key"),)
+
+
+class TradingPreference(Base):
+    __tablename__ = "trading_preferences"
+    field: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[str] = mapped_column(String(500))
+    source: Mapped[str] = mapped_column(String(30))
+    quote: Mapped[str] = mapped_column(String(1000))
+    source_message_id: Mapped[str | None] = mapped_column(ForeignKey("advice_messages.id"), nullable=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now)

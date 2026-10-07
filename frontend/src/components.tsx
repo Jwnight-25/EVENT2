@@ -105,15 +105,55 @@ export function Modal({
   title,
   close,
   children,
+  className = "",
 }: {
   title: string;
   close: () => void;
   children: ReactNode;
+  className?: string;
 }) {
+  const panel = useRef<HTMLElement>(null);
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    panel.current?.focus();
+    function keyboard(event: KeyboardEvent) {
+      if (event.key === "Escape") closeRef.current();
+      if (event.key !== "Tab") return;
+      const items = Array.from(
+        panel.current?.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, a[href]",
+        ) || [],
+      ).filter((e) => e.getClientRects().length);
+      const first = items[0],
+        last = items.at(-1);
+      if (
+        first &&
+        (!panel.current?.contains(document.activeElement) ||
+          document.activeElement === panel.current ||
+          (!event.shiftKey && document.activeElement === last) ||
+          (event.shiftKey && document.activeElement === first))
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first)?.focus();
+      }
+    }
+    document.addEventListener("keydown", keyboard);
+    return () => {
+      document.body.style.overflow = overflow;
+      document.removeEventListener("keydown", keyboard);
+      previous?.focus();
+    };
+  }, []);
   return (
     <div className="overlay" onClick={close}>
       <section
-        className="modal"
+        ref={panel}
+        tabIndex={-1}
+        className={"modal " + className}
         role="dialog"
         aria-modal="true"
         aria-label={title}

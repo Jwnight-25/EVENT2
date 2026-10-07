@@ -29,6 +29,7 @@ def finish(job_id, status, error=None):
 def _execute_job(job_id):
     from .research import train_job, prediction_job, Cancelled, BudgetExceeded
 
+    kind = None
     try:
         with SessionLocal() as db:
             job = db.get(Job, job_id)
@@ -40,7 +41,14 @@ def _execute_job(job_id):
         elif kind == "ai":
             from .integrations import analyze_prediction
 
-            analyze_prediction(payload["prediction_id"])
+            if analyze_prediction(payload["prediction_id"]) != "succeeded":
+                raise DomainError(
+                    "AI解释失败，请检查服务、权限和来源后重试；模型结果已保留", "ai_failed", 502
+                )
+        elif kind == "advice":
+            from .advice import advice_job
+
+            advice_job(job_id)
         else:
             raise ValueError("未知任务类型")
         with SessionLocal() as db:
@@ -50,8 +58,15 @@ def _execute_job(job_id):
         finish(job_id, "cancelled")
     except BudgetExceeded:
         finish(job_id, "failed", "计算预算已用尽；未发布本次未完成的模型")
+    except DomainError as exc:
+        finish(job_id, "failed", exc.message)
     except Exception as exc:
-        finish(job_id, "failed", f"{type(exc).__name__}: {str(exc)[:800]}")
+        error = (
+            "AI任务未完成，请检查服务或稍后重试；对话和模型结果保持可查"
+            if kind in ("ai", "advice")
+            else f"{type(exc).__name__}: {str(exc)[:800]}"
+        )
+        finish(job_id, "failed", error)
 
 
 def execute_job(job_id):

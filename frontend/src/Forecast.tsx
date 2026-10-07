@@ -24,6 +24,10 @@ import { TimeScrollbar } from "./TimeScrollbar";
 import { forecastPlot } from "./forecastPlot";
 import { recentWindow, visibleIndices, type WindowRange } from "./chartUtils";
 import { summarizePath, type ForecastPoint } from "./forecastSummary";
+import { AdviceDialog } from "./AdviceDialog";
+import { AISettingsForm, type AIConfig } from "./AISettings";
+import { AIContent } from "./AIContent";
+import { Modal } from "./components";
 
 export function Forecast({
   stock,
@@ -42,6 +46,9 @@ export function Forecast({
   const [experimental, setExperimental] = useState(false);
   const [resultModelId, setResultModelId] = useState("");
   const [aiJob, setAIJob] = useState("");
+  const [chatOpen, setChatOpen] = useState(false);
+  const [aiSettingsOpen, setAISettingsOpen] = useState(false);
+  const [aiVersion, setAIVersion] = useState(0);
   const [observationStart, setObservationStart] = useState("");
   const storageKey = "prediction-job-" + stock?.id + "-" + basis;
   const [job, setJob] = useState(localStorage.getItem(storageKey) || "");
@@ -78,9 +85,9 @@ export function Forecast({
         : Promise.resolve([]),
     [stock?.id, version],
   );
-  const { data: integrations } = useLoad(
-    () => api<Record<string, string>>("/integrations"),
-    [],
+  const { data: aiConfig } = useLoad(
+    () => api<AIConfig>("/ai/settings"),
+    [aiVersion],
   );
   const latest =
     predictionId ||
@@ -240,8 +247,36 @@ export function Forecast({
           <h1>预测分析</h1>
           <p>先选择模型与周期，生成数值预测，再按需联网解释。</p>
         </div>
-        <span className="pill">收盘后 · 手动分析</span>
+        <div className="row">
+          <button
+            className="secondary"
+            disabled={!stock}
+            onClick={() => setChatOpen(true)}
+          >
+            交易建议对话
+          </button>
+          <button className="text-btn" onClick={() => setAISettingsOpen(true)}>
+            AI接入设置
+          </button>
+        </div>
       </div>
+      {chatOpen && stock && (
+        <AdviceDialog
+          key={stock.id}
+          stock={stock}
+          prediction={prediction}
+          history={history || []}
+          close={() => {
+            setChatOpen(false);
+            setAIVersion((v) => v + 1);
+          }}
+        />
+      )}
+      {aiSettingsOpen && (
+        <Modal title="AI接入设置" close={() => setAISettingsOpen(false)}>
+          <AISettingsForm saved={() => setAIVersion((v) => v + 1)} />
+        </Modal>
+      )}
       <section className="card">
         <h2>1 · 选择模型与预测周期</h2>
         <div className="prediction-settings">
@@ -759,10 +794,10 @@ export function Forecast({
           </div>
           <section className="card" style={{ marginTop: 20 }}>
             <div className="card-heading">
-              <h2>3 · 按需联网AI解释</h2>
+              <h2>3 · 点击生成AI解释</h2>
               <button
                 className="secondary"
-                disabled={integrations?.ai !== "configured" || busy}
+                disabled={!aiConfig?.explanation_available || busy}
                 onClick={async () => {
                   setBusy(true);
                   setError("");
@@ -780,41 +815,38 @@ export function Forecast({
                 }}
               >
                 {prediction?.ai_analyses?.length
-                  ? "重新联网解释"
+                  ? "重新生成解释"
                   : "解释这次预测"}
               </button>
             </div>
             <p className="section-note">
-              {integrations?.ai === "configured"
-                ? "服务接口已配置；点击后才检索公告、财报与事件，并提供引用来源。"
-                : "当前未连接联网AI服务。接入支持联网检索的服务后才能解释这次预测；数值预测可以独立完成。"}{" "}
+              {aiConfig?.explanation_available
+                ? aiConfig.web_search
+                  ? "已配置联网服务；点击后才检索公告、财报与事件，并提供引用来源。"
+                  : aiConfig.provider === "legacy"
+                    ? "已配置研究接口，点击生成并核验来源。"
+                    : "已配置普通对话服务；解释保存的模型结果，本次不联网。"
+                : "当前尚未接入AI。点击AI接入设置填写服务与密钥；数值预测可以独立完成。"}{" "}
               AI接收这次保存的模型结果并解释，不替代或改写预测价格。
             </p>
             {aiJob && <JobPanel id={aiJob} finished={refresh} />}
             {prediction?.ai_analyses?.length ? (
               prediction.ai_analyses.map((a) => (
                 <div key={a.id}>
-                  <p style={{ whiteSpace: "pre-wrap", fontSize: 13 }}>
-                    {a.content.text || a.content.message}
-                  </p>
-                  <div className="sources">
-                    {a.content.sources?.map((s: any) => (
-                      <div key={s.url}>
-                        <a href={s.url} target="_blank" rel="noreferrer">
-                          {s.title}
-                        </a>
-                        <small className="muted">
-                          发布时间：{s.published_at || "未知"} · 检索：
-                          {s.retrieved_at}
-                        </small>
-                      </div>
-                    ))}
-                  </div>
+                  <small className="ai-evidence-label">
+                    {a.content.web_searched
+                      ? "已进行联网检索"
+                      : a.content.provider === "configured_http"
+                        ? "外部接口来源"
+                        : "本次未联网"}{" "}
+                    · {a.created_at.slice(0, 16).replace("T", " ")}
+                  </small>
+                  <AIContent content={a.content} />
                 </div>
               ))
             ) : (
               <p className="muted">
-                未进行联网分析。接口预留，模型数值结果独立保存。
+                尚未生成AI解释。点击后才请求服务并保存回答。
               </p>
             )}
           </section>

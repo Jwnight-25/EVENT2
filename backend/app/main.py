@@ -1,5 +1,4 @@
 import json
-import os
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -23,6 +22,8 @@ from .entities import (
     AIAnalysis,
     BarCurrent,
     CalendarDay,
+    AdviceConversation,
+    TradingPreference,
 )
 from .errors import DomainError, require
 from .market import preview, commit_import, current_bars, aggregate, create_snapshot, read_file
@@ -33,6 +34,11 @@ from .schemas import (
     TrainingRequest,
     PredictionRequest,
     PriceBasis,
+    AISettingsRequest,
+    ConversationRequest,
+    AdviceRequest,
+    PreferenceRequest,
+    PreferenceField,
 )
 from .calendar import calendar, future_dates
 
@@ -49,7 +55,7 @@ async def lifespan(_):
     engine.dispose()
 
 
-app = FastAPI(title="EVENT2 · 股票研究", version="0.8.0", lifespan=lifespan)
+app = FastAPI(title="EVENT2 · 股票研究", version="0.9.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -494,7 +500,9 @@ def ai_retry(identifier: str, db: DB):
     prediction = require(db.get(Prediction, identifier))
     if not prediction.result:
         raise DomainError("数值预测尚未完成", "prediction_not_ready", 409)
-    if not os.getenv("AI_ANALYSIS_URL"):
+    from .ai_settings import public_settings
+
+    if not public_settings()["explanation_available"]:
         raise DomainError(
             "尚未配置联网AI服务，请先设置分析接口；已保存的模型预测可独立查看", "ai_not_configured", 409
         )
@@ -525,12 +533,139 @@ def job_cancel(identifier: str, db: DB):
 
 @app.get(API_PREFIX + "/integrations")
 def integrations():
+    from .ai_settings import public_settings
+
+    config = public_settings()
     return {
         "market_data": "not_configured",
-        "ai": "configured" if os.getenv("AI_ANALYSIS_URL") else "not_configured",
+        "ai": "configured" if config["explanation_available"] else "not_configured",
+        "ai_chat": "configured" if config["chat_available"] else "not_configured",
+        "ai_web_search": config["web_search"],
         "deep_models": "optional",
         "trading": "not_supported",
     }
+
+
+@app.get(API_PREFIX + "/ai/settings")
+def ai_settings():
+    from .ai_settings import public_settings
+
+    return public_settings()
+
+
+@app.post(API_PREFIX + "/ai/settings")
+def ai_settings_save(body: AISettingsRequest, db: DB):
+    from .ai_settings import save_settings
+
+    if db.scalar(select(Job.id).where(Job.kind.in_(["ai", "advice"]), Job.status.in_(["queued", "running"]))):
+        raise DomainError("请先完成或取消AI任务，再更换服务设置", "ai_busy", 409)
+    return save_settings(body)
+
+
+@app.post(API_PREFIX + "/ai/test")
+def ai_connection_test():
+    from .ai_client import AIClient
+    from .ai_settings import public_settings
+
+    if not public_settings()["chat_available"]:
+        raise DomainError("请先保存AI配置", "ai_not_configured", 409)
+    try:
+        result = AIClient().complete("用中文简短回答。", [{"role": "user", "content": "回复：连接成功"}])
+    except Exception:
+        raise DomainError("连接失败，请检查服务地址、密钥、模型权限和网络", "ai_test_failed", 502) from None
+    return {"connected": True, "model": result.get("model"), "web_search_tested": False}
+
+
+@app.get(API_PREFIX + "/advice/preferences")
+def advice_preferences(db: DB):
+    from .advice import profile
+
+    return profile(db)
+
+
+@app.post(API_PREFIX + "/advice/preferences")
+def advice_preference_save(body: PreferenceRequest, db: DB):
+    from .advice import update_preference
+
+    return update_preference(db, body)
+
+
+@app.post(API_PREFIX + "/advice/preferences/{field}/forget")
+def advice_preference_forget(field: PreferenceField, db: DB):
+    from .advice import profile, serial_write
+
+    serial_write(db)
+    item = db.scalar(
+        select(TradingPreference).where(TradingPreference.field == field).with_for_update()
+    ) or TradingPreference(field=field)
+    item.value, item.source, item.quote = "", "forgotten", ""
+    item.confirmed, item.locked, item.source_message_id, item.updated_at = False, True, None, now()
+    db.add(item)
+    db.commit()
+    return profile(db)
+
+
+@app.post(API_PREFIX + "/advice/preferences/{field}/resume")
+def advice_preference_resume(field: PreferenceField, db: DB):
+    from .advice import profile, serial_write
+
+    serial_write(db)
+    item = db.scalar(select(TradingPreference).where(TradingPreference.field == field).with_for_update())
+    if item:
+        item.locked, item.updated_at = False, now()
+        db.commit()
+    return profile(db)
+
+
+@app.get(API_PREFIX + "/advice/conversations")
+def advice_conversations(db: DB, stock_id: str):
+    require(db.get(Stock, stock_id))
+    return [
+        encode(c)
+        for c in db.scalars(
+            select(AdviceConversation)
+            .where(AdviceConversation.stock_id == stock_id)
+            .order_by(AdviceConversation.updated_at.desc())
+            .limit(100)
+        )
+    ]
+
+
+@app.post(API_PREFIX + "/advice/conversations", status_code=201)
+def advice_conversation_create(body: ConversationRequest, db: DB):
+    require(db.get(Stock, body.stock_id))
+    conversation = AdviceConversation(stock_id=body.stock_id, title="新的交易研究对话")
+    db.add(conversation)
+    db.commit()
+    return encode(conversation)
+
+
+@app.get(API_PREFIX + "/advice/conversations/{identifier}")
+def advice_conversation_detail(identifier: str, db: DB):
+    from .advice import conversation_detail
+
+    return conversation_detail(db, identifier)
+
+
+@app.post(API_PREFIX + "/advice/conversations/{identifier}/messages", status_code=202)
+def advice_message_create(identifier: str, body: AdviceRequest, db: DB):
+    from .advice import enqueue_message
+
+    return enqueue_message(db, identifier, body)
+
+
+@app.post(API_PREFIX + "/advice/messages/{identifier}/retry", status_code=202)
+def advice_message_retry(identifier: str, db: DB):
+    from .advice import retry_message
+
+    return retry_message(db, identifier)
+
+
+@app.post(API_PREFIX + "/advice/conversations/{identifier}/forget")
+def advice_conversation_forget(identifier: str, db: DB):
+    from .advice import forget_conversation
+
+    return forget_conversation(db, identifier)
 
 
 @app.get(API_PREFIX + "/maintenance/status")

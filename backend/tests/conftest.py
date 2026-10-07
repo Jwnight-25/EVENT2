@@ -14,6 +14,9 @@ from backend.app.main import app
 
 @pytest.fixture
 def client():
+    from backend.app.ai_settings import SETTINGS_FILE
+
+    SETTINGS_FILE.unlink(missing_ok=True)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     with TestClient(app) as connection:

@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+ai-settings.json
+.ai-settings-*
 data/
 node_modules/
 frontend/dist/

@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 from .db import SessionLocal
 from .entities import Prediction, AIAnalysis, Stock
+from .ai_settings import public_settings
 
 
 class DataProvider(Protocol):
@@ -78,11 +79,29 @@ def analyze_prediction(identifier, provider=None):
             "forecast": prediction.result,
             "instructions": "联网查阅公告、财报及事件，返回text与sources；区分事实和推断，不修改模型数值，不给出自动交易指令。",
         }
-    if not provider and not os.getenv("AI_ANALYSIS_URL"):
+    status_settings = public_settings()
+    if not provider and not status_settings["explanation_available"]:
         status, content = "not_configured", {"message": "尚未配置联网分析接口，模型结果已保留"}
     else:
         try:
-            content = (provider or HttpAnalysisProvider()).analyze(request)
+            if provider or status_settings["provider"] == "legacy":
+                content = (provider or HttpAnalysisProvider()).analyze(request)
+            else:
+                from .ai_client import AIClient
+                from .advice import context_for
+
+                with SessionLocal() as db:
+                    context = context_for(db, prediction.stock_id, identifier)
+                content = AIClient().advise(
+                    context,
+                    [
+                        {
+                            "role": "user",
+                            "content": "解释这次保存的预测：价格区间、走势、模型证据和分歧，结合最新可核实公告与财报列出影响因素，区分事实和推断。",
+                        }
+                    ],
+                )
+                content["context"] = context
             status = "succeeded"
         except Exception:
             # Do not persist response bodies, URLs or headers that may contain secrets.
@@ -91,3 +110,4 @@ def analyze_prediction(identifier, provider=None):
         db.add(AIAnalysis(prediction_id=identifier, status=status, content=content))
         db.get(Prediction, identifier).ai_status = status
         db.commit()
+    return status
