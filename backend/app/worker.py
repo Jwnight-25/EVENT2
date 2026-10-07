@@ -14,6 +14,8 @@ from sqlalchemy import select
 from .config import DATA_DIR
 from .db import SessionLocal, now, engine
 from .entities import Job
+from .storage import storage_lock
+from .errors import DomainError
 
 
 def finish(job_id, status, error=None):
@@ -24,7 +26,7 @@ def finish(job_id, status, error=None):
         db.commit()
 
 
-def execute_job(job_id):
+def _execute_job(job_id):
     from .research import train_job, prediction_job, Cancelled, BudgetExceeded
 
     try:
@@ -52,7 +54,23 @@ def execute_job(job_id):
         finish(job_id, "failed", f"{type(exc).__name__}: {str(exc)[:800]}")
 
 
+def execute_job(job_id):
+    try:
+        with storage_lock():
+            _execute_job(job_id)
+    except DomainError:
+        finish(job_id, "failed", "存储正在备份，请稍后重试")
+
+
 def claim_job():
+    try:
+        with storage_lock():
+            return _claim_job()
+    except DomainError:
+        return None
+
+
+def _claim_job():
     with SessionLocal() as db:
         query = select(Job).where(Job.status == "queued").order_by(Job.created_at).limit(1)
         if engine.dialect.name == "postgresql":
@@ -85,7 +103,8 @@ def main(once=False):
         pg_lock = engine.connect()
         if not pg_lock.scalar(text("SELECT pg_try_advisory_lock(20261005)")):
             raise SystemExit("该数据库已有工作进程")
-    recover()
+    with storage_lock():
+        recover()
     context = mp.get_context("spawn")
     stopping = False
 

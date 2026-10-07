@@ -5,6 +5,7 @@ import {
   BrainCircuit,
   ChartLine,
   CalendarDays,
+  Database,
   Monitor,
   Plus,
   CircleHelp,
@@ -15,9 +16,11 @@ import { useLoad } from "./components";
 import { Market, AddStock } from "./Market";
 import { Training } from "./Training";
 import { Forecast } from "./Forecast";
+import { Maintenance } from "./Maintenance";
 import { CalendarUpload } from "./CalendarUpload";
 
 export default function App() {
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [page, setPage] = useState("market");
   const [stockId, setStockId] = useState("");
@@ -74,6 +77,15 @@ export default function App() {
           })}
         </nav>
         <div className="sidebar-footer">
+          <button
+            className="calendar-button"
+            aria-label="数据与备份"
+            title="数据与备份"
+            onClick={() => setMaintenanceOpen(true)}
+          >
+            <Database size={18} aria-hidden="true" />
+            <span className="nav-text">数据与备份</span>
+          </button>
           <button
             type="button"
             className="calendar-button"
@@ -175,10 +187,17 @@ export default function App() {
           )}
         </main>
         <footer>
-          EVENT2 RESEARCH　·　可追溯的数据，独立验证的模型
+          EVENT2 RESEARCH　·　可追溯的数据，可核查的模型
           <span>市场时间：Asia/Shanghai</span>
         </footer>
       </div>
+      {maintenanceOpen && (
+        <Maintenance
+          stock={stock}
+          basis={basis}
+          close={() => setMaintenanceOpen(false)}
+        />
+      )}
       {calendarOpen && <CalendarUpload close={() => setCalendarOpen(false)} />}{" "}
       {adding && <AddStock close={() => setAdding(false)} added={refresh} />}
     </div>

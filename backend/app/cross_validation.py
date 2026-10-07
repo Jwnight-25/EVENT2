@@ -64,7 +64,7 @@ def merge_folds(metrics, series):
     return result, combined
 
 
-def validate_family(rows, features, horizon, family, settings, config, job_id, deadline):
+def validate_family(rows, features, horizon, family, settings, config, job_id, deadline, prepared=None):
     from .research import STEPS, fit, evaluate, checkpoint
 
     boundaries = fold_boundaries(len(rows), STEPS[horizon])
@@ -73,7 +73,11 @@ def validate_family(rows, features, horizon, family, settings, config, job_id, d
     for index, boundary in enumerate(boundaries):
         fit_end, start, end = boundary["fit_end"], boundary["start"], boundary["end"]
         checkpoint(job_id, f"15%交叉验证 第{index + 1}/3折 · {family} · {horizon}", deadline=deadline)
-        artifact = fit(rows, features, fit_end, horizon, family, settings["parameters"], config["seed"])
+        artifact = (
+            prepared[index]
+            if prepared
+            else fit(rows, features, fit_end, horizon, family, settings["parameters"], config["seed"])
+        )
         artifact["coverage"] = config["coverage"]
         _, errors, _ = evaluate(
             artifact,

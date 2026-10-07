@@ -49,7 +49,7 @@ async def lifespan(_):
     engine.dispose()
 
 
-app = FastAPI(title="EVENT2 · 股票研究", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="EVENT2 · 股票研究", version="0.8.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -82,7 +82,16 @@ async def request_id(request: Request, call_next):
                 "request_id": request.state.request_id,
             },
         )
-    response = await call_next(request)
+    if request.method == "POST" and not request.url.path.startswith(API_PREFIX + "/maintenance/backups"):
+        from .storage import storage_lock
+
+        try:
+            with storage_lock():
+                response = await call_next(request)
+        except DomainError as error:
+            return await domain_error(request, error)
+    else:
+        response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     return response
 
@@ -375,6 +384,7 @@ def models(
         query = query.where(Model.run_id == run_id)
     records = list(db.scalars(query.order_by(Model.created_at.desc()).limit(100)))
     from .assessment import assess_models, CHECK_LABELS
+    from .reliability import reliability
     from .market import load_snapshot
     from .research import STEPS
 
@@ -387,6 +397,12 @@ def models(
     for model in records:
         item = encode(model, ("artifact_path", "diagnostics"))
         item["metrics"] = {**model.metrics, "assessment": evidence[model.id]}
+        baseline = db.scalar(
+            select(Model).where(
+                Model.run_id == model.run_id, Model.horizon == model.horizon, Model.family == "naive"
+            )
+        )
+        item["metrics"]["reliability"] = reliability(model, baseline)
         failed = [
             CHECK_LABELS.get(key, key)
             for key, passed in model.metrics.get("acceptance_checks", {}).items()
@@ -515,3 +531,61 @@ def integrations():
         "deep_models": "optional",
         "trading": "not_supported",
     }
+
+
+@app.get(API_PREFIX + "/maintenance/status")
+def maintenance_status(db: DB, stock_id: str, price_basis: PriceBasis = "raw"):
+    from .maintenance import data_status
+
+    return data_status(db, stock_id, price_basis)
+
+
+@app.post(API_PREFIX + "/maintenance/backups", status_code=201)
+def maintenance_backup():
+    from .backup import backup
+    from .config import BACKUP_DIR
+    from .db import uid
+    from pathlib import Path
+
+    identifier = now().replace(":", "").replace(".", "-") + "-" + uid()[:8]
+    destination = BACKUP_DIR / identifier
+    try:
+        result = backup(destination)
+    except (ValueError, OSError) as exc:
+        raise DomainError(str(exc), "backup_failed", 409)
+    return {"id": identifier, "path": str(Path(destination)), **result}
+
+
+@app.post(API_PREFIX + "/maintenance/backups/{identifier}/verify")
+def maintenance_verify(identifier: str):
+    from .backup import verify
+    from .config import BACKUP_DIR
+
+    if "/" in identifier or "\\" in identifier or identifier in (".", ".."):
+        raise DomainError("备份名称无效")
+    destination = (BACKUP_DIR / identifier).resolve()
+    if destination.parent != BACKUP_DIR:
+        raise DomainError("备份名称无效")
+    try:
+        return verify(destination)
+    except (ValueError, OSError, KeyError) as exc:
+        raise DomainError(str(exc), "backup_invalid", 409)
+
+
+@app.post(API_PREFIX + "/maintenance/compare")
+async def maintenance_compare(
+    db: DB,
+    file: UploadFile = File(),
+    stock_id: str = Form(),
+    price_basis: PriceBasis = Form("raw"),
+    source: str = Form(min_length=1, max_length=200),
+    volume_unit: Literal["shares", "lots"] = Form("shares"),
+):
+    from .maintenance import compare_upload
+
+    content = await file.read(MAX_UPLOAD + 1)
+    if len(content) > MAX_UPLOAD:
+        raise DomainError("文件超过20MB")
+    return compare_upload(
+        db, stock_id, price_basis, content, file.filename or "comparison.csv", source, volume_unit
+    )

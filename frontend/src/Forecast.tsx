@@ -1,3 +1,4 @@
+import { EvidenceLabels } from "./EvidenceLabels";
 import { useMemo, useState } from "react";
 import { Telescope, ArrowUpRight } from "lucide-react";
 import type { EChartsOption, SeriesOption } from "echarts";
@@ -358,6 +359,17 @@ export function Forecast({
       {historyError && <p className="error">{historyError}</p>}
       {result?.models?.length ? (
         <>
+          {result.model_failures?.length > 0 && (
+            <div className="notice">
+              <strong>部分模型未完成本次最新拟合</strong>
+              <p>
+                {result.model_failures
+                  .map((m: any) => `${m.family}：${m.error}`)
+                  .join("；")}
+                。仅展示成功模型的预测，不用旧产物替代失败的新拟合。
+              </p>
+            </div>
+          )}
           <div className="forecast-grid">
             <section className="card">
               <div className="card-heading">
@@ -430,6 +442,7 @@ export function Forecast({
                   </option>
                 ))}
               </select>
+              <EvidenceLabels evidence={first.reliability} />
               <small className="muted">终点收盘价估计 / 区间</small>
               <strong>¥ {money(endpoint?.estimate)}</strong>
               <p>
@@ -442,7 +455,18 @@ export function Forecast({
                   </li>
                 )}
                 <li>目标覆盖率：{pct(first.nominal_coverage)}</li>
-                <li>历史实际覆盖：{pct(first.historical_coverage)}</li>
+                <li>原版本历史覆盖：{pct(first.historical_coverage)}</li>
+                {first.deployment && (
+                  <>
+                    <li>
+                      近期滚动复核覆盖：
+                      {pct(first.deployment.recent_audit.coverage)}
+                    </li>
+                    <li>
+                      近期复核MAE：{money(first.deployment.recent_audit.mae)} 元
+                    </li>
+                  </>
+                )}
                 <li>
                   参数拟合截止：{first.fitted_through || "历史结果未记录"}
                 </li>
@@ -454,10 +478,71 @@ export function Forecast({
               <p className="section-note">
                 {first.evaluation_mode === "cross_validation" &&
                   "该模型通过已有历史数据内部交叉验证；匹配度不是方向准确率或盈利概率。"}
+                {first.deployment?.note}。
                 10%仅为观察阈值。区间上沿不是未来最高价，也不代表继续持有条件。
               </p>
             </aside>
           </div>
+          {first.deployment && (
+            <section className="card">
+              <h2>本次预测的最新拟合与近期复核</h2>
+              <p>
+                最新参数拟合截止：{first.fitted_through}；原评估版本拟合截止：
+                {first.evaluation_fitted_through}。
+              </p>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>过程</th>
+                      <th>日期区段</th>
+                      <th>样本 / 指标</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>滚动残差校准</td>
+                      <td>
+                        {first.deployment.calibration_start} —{" "}
+                        {first.deployment.calibration_end}
+                      </td>
+                      <td>{first.deployment.calibration_samples}个预测起点</td>
+                    </tr>
+                    <tr>
+                      <td>近期复核</td>
+                      <td>
+                        {first.deployment.audit_start} —{" "}
+                        {first.deployment.audit_end}
+                      </td>
+                      <td>
+                        {first.deployment.recent_audit.sample_count}个起点；约
+                        {first.deployment.recent_audit.nonoverlap_windows}
+                        个不重叠窗口
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>复核覆盖 / 平均宽度</td>
+                      <td>{pct(first.deployment.recent_audit.coverage)}</td>
+                      <td>
+                        ¥{money(first.deployment.recent_audit.mean_width)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>复核MAE / 区间评分</td>
+                      <td>¥{money(first.deployment.recent_audit.mae)}</td>
+                      <td>
+                        {money(first.deployment.recent_audit.interval_score)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p className="section-note">
+                {first.deployment.note}
+                。历史匹配度和基准优势属于原评估版本，最新拟合版本还没有未来真实结果，不将旧成绩视作其验收成绩。
+              </p>
+            </section>
+          )}
           {pathSummary && (
             <section className="card">
               <div className="card-heading">
@@ -627,7 +712,8 @@ export function Forecast({
                 </div>
               </div>
               <p className="section-note">
-                各字段区间不构成整根K线的联合覆盖保证。
+                建模方式：{first.ohlc_method || "历史版本未记录"}
+                。各字段区间不构成整根K线的联合覆盖保证；原入选指标仅为收盘价格匹配。
               </p>
             </section>
           )}

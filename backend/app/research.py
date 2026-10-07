@@ -24,7 +24,7 @@ from .market import load_snapshot
 from .calendar import future_dates
 
 STEPS = {"next_day": 1, "one_month": 20, "three_months": 60}
-VERSION = "direct-multistep-v3"
+VERSION = "direct-multistep-v4"
 
 
 def relative_improvement(error, baseline):
@@ -161,7 +161,7 @@ def candidates(family, config=None):
             for a in np.unique(
                 np.geomspace(
                     config.get("ridge_alpha_min", 0.01),
-                    config.get("ridge_alpha_max", 1000),
+                    config.get("ridge_alpha_max", 100000),
                     12 if expanded else 6,
                 )
             )
@@ -169,8 +169,8 @@ def candidates(family, config=None):
         "arima": [{"order": p} for p in orders],
         "sarima": [
             {"order": [1, 1, 0], "seasonal_order": [p, 0, q, period]}
-            for period in ((5, 20) if expanded else (5,))
             for p, q in ((1, 0), (0, 1), (1, 1))
+            for period in ((5, 20) if expanded or config.get("search_profile") == "adaptive" else (5,))
         ],
         "lightgbm": [
             {"num_leaves": n, "n_estimators": count, "learning_rate": rate}
@@ -340,7 +340,9 @@ def volatility_scale(artifact, rows, origin):
     return np.repeat(ratio[0], 4) if artifact["horizon"] == "next_day" else ratio
 
 
-def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None, max_samples=32):
+def evaluate(
+    artifact, rows, features, start, end, job_id, deadline, width=None, max_samples=32, minimum_samples=8
+):
     horizon = artifact["horizon"]
     # Frozen coefficients within this evaluation window. Actual observations update
     # only causal input/state, never fitted parameters.
@@ -389,7 +391,7 @@ def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None,
                     / 2
                 ).tolist()
             )
-    if len(estimates) < 8:
+    if len(estimates) < minimum_samples:
         raise ValueError("评估窗口有效样本不足8；请增加历史数据")
     estimates, actuals = np.array(estimates), np.array(actuals)
     base_prices = np.array([rows[i]["close"] for i in origins])
@@ -523,6 +525,8 @@ def nominate_families(family_best, mode):
 def train_job(job_id):
     from .assessment import assess_models, CHECK_LABELS
     from .cross_validation import fold_boundaries, validate_family
+    from .search import refine_ridge, choose_fittable
+    from .reliability import reliability
 
     with SessionLocal() as db:
         job = db.get(Job, job_id)
@@ -567,7 +571,7 @@ def train_job(job_id):
         "limits": [
             "20/60交易日为实验跨度，不等同精确自然月",
             "区间为边际经验校准，存在时序依赖",
-            "首版冻结拟合参数，不在验收后用测试数据重拟合",
+            "评估产物保持冻结；预测单独用固定参数进行最新拟合，历史成绩不转移给新产物",
         ],
     }
     with SessionLocal() as db:
@@ -595,6 +599,8 @@ def train_job(job_id):
             }
             continue
         family_best = {}
+        ranked_candidates = {}
+        search_history = {}
         trial_count = 0
         exhausted = False
         families = ["naive", *dict.fromkeys(f for f in config["families"] if f != "naive")]
@@ -607,7 +613,23 @@ def train_job(job_id):
             for parameters in grids[family][index : index + 1]
         ]
         family_counts = {f: 0 for f in families}
-        for family, parameters in proposals:
+
+        def proposal_stream():
+            yield from proposals
+            if config.get("search_profile") == "adaptive" and "ridge" in families:
+                # This stage uses only the two pre-CV tuning windows.
+                stale = 0
+                while family_counts["ridge"] < (config.get("trials_per_family") or config["max_trials"]):
+                    history = search_history.get("ridge", [])
+                    proposal = refine_ridge(history, config["ridge_alpha_min"], config["ridge_alpha_max"])
+                    if proposal is None or stale >= 3:
+                        break
+                    previous = family_best.get("ridge", {}).get("score", float("inf"))
+                    yield "ridge", proposal
+                    current = family_best.get("ridge", {}).get("score", float("inf"))
+                    stale = 0 if current < previous * 0.999 else stale + 1
+
+        for family, parameters in proposal_stream():
             if family != "naive":
                 cap = config.get("trials_per_family")
                 if (cap and family_counts[family] >= cap) or (
@@ -621,11 +643,25 @@ def train_job(job_id):
                 for fit_end, evaluate_end in ((train_end, middle), (middle, val_end)):
                     artifact = fit(rows, features, fit_end, horizon, family, parameters, config["seed"])
                     metric, _, _ = evaluate(
-                        artifact, rows, features, fit_end + 1, evaluate_end, job_id, deadline
+                        artifact,
+                        rows,
+                        features,
+                        fit_end + 1,
+                        evaluate_end,
+                        job_id,
+                        deadline,
+                        max_samples=config.get("tuning_samples", 96),
                     )
                     windows.append(metric)
                 score = float(np.mean([m["mae"] for m in windows]))
-                trial_report = {"validation_windows": windows, "validation_mae": score}
+                trial_report = {
+                    "validation_windows": windows,
+                    "validation_mae": score,
+                    "search_stage": "coarse" if parameters in grids[family] else "refinement",
+                }
+                ranked_candidates.setdefault(family, []).append(
+                    {"parameters": parameters, "score": score, "windows": windows}
+                )
                 if family not in family_best or score < family_best[family]["score"]:
                     family_best[family] = {"parameters": parameters, "score": score, "windows": windows}
                 status = "succeeded"
@@ -637,6 +673,9 @@ def train_job(job_id):
                 raise
             except Exception as exc:
                 status, trial_report = "failed", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+            search_history.setdefault(family, []).append(
+                {"parameters": parameters, "score": score if status == "succeeded" else None}
+            )
             with SessionLocal() as db:
                 db.add(
                     Trial(
@@ -679,9 +718,24 @@ def train_job(job_id):
                     db.get(TrainingRun, run_id).report = report
                     db.commit()
                 cv_details = None
+                prepared = None
+                fallbacks = []
+                if mode == "cross_validation":
+                    settings, prepared, fallbacks = choose_fittable(
+                        rows,
+                        features,
+                        horizon,
+                        family,
+                        sorted(ranked_candidates[family], key=lambda item: item["score"]),
+                        [f["fit_end"] for f in fold_boundaries(n, steps)],
+                        config["seed"],
+                        job_id,
+                        deadline,
+                    )
+                    family_best[family] = settings
                 if mode == "cross_validation":
                     artifact, test_metric, series, cv_details, calibration_count = validate_family(
-                        rows, features, horizon, family, settings, config, job_id, deadline
+                        rows, features, horizon, family, settings, config, job_id, deadline, prepared=prepared
                     )
                 else:
                     artifact = fit(
@@ -714,6 +768,10 @@ def train_job(job_id):
                     "calibration_samples": calibration_count,
                     "fitted_through": rows[artifact["fit_end"]]["time"],
                     "steps": steps,
+                    "fitting_fallbacks": fallbacks,
+                    "search_at_boundary": family == "ridge"
+                    and settings["parameters"]["alpha"]
+                    in (config["ridge_alpha_min"], config["ridge_alpha_max"]),
                 }
                 if cv_details:
                     metrics["cross_validation"] = cv_details
@@ -817,6 +875,8 @@ def train_job(job_id):
         evidence = assess_models(local_models, rows, steps)
         for model in local_models:
             model.metrics = {**model.metrics, "assessment": evidence[model.id]}
+        for model in local_models:
+            model.metrics = {**model.metrics, "reliability": reliability(model, results["naive"])}
         staged_models.extend(local_models)
         completed_horizons.append(horizon)
         report["horizons"][horizon] = {
@@ -825,6 +885,11 @@ def train_job(job_id):
             "nominees": nominees,
             "trials": trial_count,
             "trials_by_family": family_counts,
+            "search_method": "coarse-grid + bounded Ridge refinement"
+            if config.get("search_profile") == "adaptive"
+            else "fixed-grid",
+            "tuning_samples_per_window": config.get("tuning_samples", 96),
+            "stop_rule": "参数试验上限、总时限或细化阶段连续3次无0.1%改善；不根据最终交叉验证反复调参",
             "message": "15%时序交叉验证完成"
             if mode == "cross_validation"
             else "研究实验完成；模型仅供研究选择"
@@ -864,65 +929,111 @@ def prediction_job(job_id):
         models = [db.get(Model, m) for m in config["model_ids"]]
         identifier, horizon, cutoff = prediction.id, prediction.horizon, snapshot.cutoff
     result_models = []
+    model_failures = []
+    prediction_deadline = time.monotonic() + 540
     reference = config.get("reference_price") or rows[-1]["close"]
     for model in models:
-        checkpoint(job_id, f"预测 {model.family}")
-        artifact = load_artifact(model)
-        vector = forecast(artifact, rows, features, len(rows) - 1)
-        price = encode_prices(vector, rows[-1]["close"], horizon)
-        low, high = interval_prices(
-            vector,
-            artifact["width"] * volatility_scale(artifact, rows, len(rows) - 1),
-            rows[-1]["close"],
-            horizon,
-        )
-        if horizon == "next_day":
-            candle = {field: float(value) for field, value in zip(["open", "high", "low", "close"], price)}
-            points = [
-                {
-                    "date": dates[0],
-                    "estimate": candle["close"],
-                    "lower": float(low[-1]),
-                    "upper": float(high[-1]),
+        try:
+            checkpoint(job_id, f"预测 {model.family}")
+            from .deployment import prepare_deployment
+            from .reliability import reliability
+
+            with SessionLocal() as db:
+                run = db.get(TrainingRun, model.run_id)
+                peers = list(
+                    db.scalars(select(Model).where(Model.run_id == model.run_id, Model.horizon == horizon))
+                )
+                baseline = next((p for p in peers if p.family == "naive"), None)
+                frozen_evidence = reliability(model, baseline)
+                training_config = run.config
+            # Evaluation artifacts remain untouched. This prediction owns a new artifact.
+            artifact, deployment = prepare_deployment(
+                rows, features, model, training_config, job_id, prediction_deadline
+            )
+            vector = forecast(artifact, rows, features, len(rows) - 1)
+            price = encode_prices(vector, rows[-1]["close"], horizon)
+            low, high = interval_prices(
+                vector,
+                artifact["width"] * volatility_scale(artifact, rows, len(rows) - 1),
+                rows[-1]["close"],
+                horizon,
+            )
+            if horizon == "next_day":
+                candle = {
+                    field: float(value) for field, value in zip(["open", "high", "low", "close"], price)
                 }
-            ]
-            ohlc_intervals = {
-                field: {"lower": float(lower_value), "upper": float(upper_value)}
-                for field, lower_value, upper_value in zip(["open", "high", "low", "close"], low, high)
-            }
-        else:
-            candle = None
-            ohlc_intervals = None
-            points = [
-                {"date": day, "estimate": float(p), "lower": float(lower_value), "upper": float(upper_value)}
-                for day, p, lower_value, upper_value in zip(dates, price, low, high)
-            ]
-        result_models.append(
-            {
-                "model_id": model.id,
-                "family": model.family,
-                "selected_at_prediction": model.selected,
-                "evaluation_mode": model.metrics.get("evaluation_mode", "holdout"),
-                "fitted_through": model.metrics["fitted_through"],
-                "experimental": not model.selected or model.metrics.get("evaluation_mode") == "research",
-                "points": points,
-                "candle": candle,
-                "ohlc_intervals": ohlc_intervals,
-                "nominal_coverage": artifact["coverage"],
-                "historical_coverage": model.metrics["test"]["coverage"],
-                "validation_price_match": model.metrics["test"].get("price_match"),
-                "interval_type": "marginal_empirical",
-                "target_upside": {
-                    "lower": float(low[-1] / reference - 1),
-                    "median": float(price[-1] / reference - 1),
-                    "upper": float(high[-1] / reference - 1),
-                },
-                "state_method": "fixed-parameters-current-input",
-                "artifact_checksum": model.artifact_checksum,
-            }
+                points = [
+                    {
+                        "date": dates[0],
+                        "estimate": candle["close"],
+                        "lower": float(low[-1]),
+                        "upper": float(high[-1]),
+                    }
+                ]
+                ohlc_intervals = {
+                    field: {"lower": float(lower_value), "upper": float(upper_value)}
+                    for field, lower_value, upper_value in zip(["open", "high", "low", "close"], low, high)
+                }
+            else:
+                candle = None
+                ohlc_intervals = None
+                points = [
+                    {
+                        "date": day,
+                        "estimate": float(p),
+                        "lower": float(lower_value),
+                        "upper": float(upper_value),
+                    }
+                    for day, p, lower_value, upper_value in zip(dates, price, low, high)
+                ]
+            result_models.append(
+                {
+                    "model_id": model.id,
+                    "family": model.family,
+                    "selected_at_prediction": model.selected,
+                    "evaluation_mode": model.metrics.get("evaluation_mode", "holdout"),
+                    "fitted_through": deployment["fitted_through"],
+                    "evaluation_fitted_through": model.metrics["fitted_through"],
+                    "deployment": deployment,
+                    "reliability": frozen_evidence,
+                    "ohlc_method": "直接学习OHLC目标"
+                    if model.family in ("ridge", "lightgbm")
+                    else "收盘模型 + 历史K线形态估计",
+                    "experimental": not model.selected or model.metrics.get("evaluation_mode") == "research",
+                    "points": points,
+                    "candle": candle,
+                    "ohlc_intervals": ohlc_intervals,
+                    "nominal_coverage": artifact["coverage"],
+                    "historical_coverage": model.metrics["test"]["coverage"],
+                    "validation_price_match": model.metrics["test"].get("price_match"),
+                    "interval_type": "marginal_empirical",
+                    "target_upside": {
+                        "lower": float(low[-1] / reference - 1),
+                        "median": float(price[-1] / reference - 1),
+                        "upper": float(high[-1] / reference - 1),
+                    },
+                    "state_method": "latest-refit-fixed-hyperparameters",
+                    "artifact_checksum": deployment["artifact_checksum"],
+                    "evaluation_artifact_checksum": model.artifact_checksum,
+                }
+            )
+        except (Cancelled, BudgetExceeded):
+            raise
+        except Exception as exc:
+            model_failures.append(
+                {
+                    "model_id": model.id,
+                    "family": model.family,
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                }
+            )
+    if not result_models:
+        raise DomainError(
+            "所选模型均未完成最新拟合或预测：" + str(model_failures)[:800], "deployment_failed", 409
         )
     # Freeze calendar dates and input history into this result; later revisions cannot alter it.
     result = {
+        "model_failures": model_failures,
         "data_cutoff": cutoff,
         "price_basis": snapshot.price_basis,
         "generated_at": now(),
@@ -946,7 +1057,7 @@ def prediction_job(job_id):
         "warnings": [
             "价格区间不代表期间最高价或可执行买卖点",
             "边际区间不是全路径覆盖保证",
-            "模型使用冻结参数和最新因果输入",
+            "模型超参数固定，预测产物使用最新快照重新拟合；历史成绩不转移",
         ],
     }
     checkpoint(job_id, "保存预测结果", 95)

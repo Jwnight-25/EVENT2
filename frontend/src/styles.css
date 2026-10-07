@@ -1066,3 +1066,20 @@ pre {
     padding: 16px 0;
   }
 }
+
+.evidence-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.evidence-labels .pill {
+  white-space: normal;
+  font-size: 11px;
+}
+.storage-path {
+  overflow-wrap: anywhere;
+}
+.modal h3 {
+  margin-top: 22px;
+}

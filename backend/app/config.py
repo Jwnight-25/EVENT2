@@ -11,11 +11,12 @@ if env_file.exists():
             os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data"))).resolve()
 DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{DATA_DIR / 'research.db'}"
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", str(DATA_DIR.parent / "event2-backups"))).resolve()
 API_PREFIX = "/api/v1"
 MAX_UPLOAD = 20 * 1024 * 1024
 
 
 def prepare_storage():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    for name in ("uploads", "snapshots", "models"):
+    for name in ("uploads", "snapshots", "models", "audits"):
         (DATA_DIR / name).mkdir(exist_ok=True)

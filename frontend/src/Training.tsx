@@ -14,6 +14,7 @@ import {
 } from "./api";
 import { Chart, Empty, JobPanel, axis, useLoad } from "./components";
 import type { EChartsOption } from "echarts";
+import { EvidenceLabels } from "./EvidenceLabels";
 import { trainingParticipation } from "./trainingParticipation";
 
 export function Training({
@@ -30,14 +31,15 @@ export function Training({
   const [diagnosticTarget, setDiagnosticTarget] = useState("");
   const [horizon, setHorizon] = useState("next_day");
   const [families, setFamilies] = useState(["arima", "ridge", "sarima"]);
-  const [trials, setTrials] = useState(6);
+  const [trials, setTrials] = useState(12);
   const [budget, setBudget] = useState(1800);
   const [mode, setMode] = useState("cross_validation");
   const [matchThreshold, setMatchThreshold] = useState(95);
-  const [profile, setProfile] = useState("standard");
+  const [profile, setProfile] = useState("adaptive");
   const [alphaMin, setAlphaMin] = useState(0.01);
-  const [alphaMax, setAlphaMax] = useState(1000);
+  const [alphaMax, setAlphaMax] = useState(100000);
   const [orderLimit, setOrderLimit] = useState(2);
+  const [tuningSamples, setTuningSamples] = useState(96);
   const [samples, setSamples] = useState(128);
   const [trainHorizons, setTrainHorizons] = useState([
     "next_day",
@@ -278,6 +280,7 @@ export function Training({
         ridge_alpha_max: alphaMax,
         arima_max_order: orderLimit,
         evaluation_samples: samples,
+        tuning_samples: tuningSamples,
       });
       setJob(result.job_id);
       localStorage.setItem(storageKey, result.job_id);
@@ -379,9 +382,20 @@ export function Training({
                 value={profile}
                 onChange={(e) => setProfile(e.target.value)}
               >
+                <option value="adaptive">分阶段搜索 · Ridge自动细化</option>
                 <option value="standard">标准网格</option>
                 <option value="expanded">扩展网格</option>
               </select>
+            </label>
+            <label>
+              每个调参窗口评估点数
+              <input
+                type="number"
+                min={32}
+                max={256}
+                value={tuningSamples}
+                onChange={(e) => setTuningSamples(Number(e.target.value))}
+              />
             </label>
             <label>
               Ridge α 下限
@@ -429,8 +443,7 @@ export function Training({
             </label>
           </div>
           <p className="section-note">
-            标准 Ridge
-            网格在上下限之间按对数间隔取6个值，扩展取12个值；ARIMA搜索不同p、d、q，扩展SARIMA增加20日季节周期。仅用滚动验证误差选择参数。试验上限和时限共同限制搜索。
+            标准Ridge取6个对数间隔值，扩展取12个；分阶段模式先比较6个值，再在最佳参数附近细化，受α上下限约束。SARIMA比较5/20日季节周期。细化连续3次没有0.1%改善、试验数或总时限达到上限即停止；只根据调参区段选择参数。
           </p>
         </details>
         <div className="check-group">
@@ -468,7 +481,7 @@ export function Training({
           模型类型是算法选项，参数试验是同类算法的不同设置，保存版本是训练成功的产物。当前有
           {catalog?.filter((f) => f.available && f.id !== "naive").length ??
             "…"}
-          类模型的依赖已安装。每类保留调参最佳版本；交叉验证保存所有成功类型，匹配度达标后最多选三个用于预测。缺少依赖的选项暂不可训练。
+          类模型的依赖已安装。每类保留调参最优且通过拟合预检的版本；最佳候选无法拟合时按调参排序最多预检前三个，最终验证成绩不触发换参数；交叉验证保存所有成功类型，匹配度达标后最多选三个用于预测。缺少依赖的选项暂不可训练。
         </p>
         <p className="section-note">
           {mode === "cross_validation"
@@ -606,6 +619,7 @@ export function Training({
                     <th>方向表现</th>
                     <th>实际覆盖</th>
                     <th>平均区间宽度</th>
+                    <th>基准与区间证据</th>
                     <th>入选状态</th>
                   </tr>
                 </thead>
@@ -632,6 +646,9 @@ export function Training({
                       <td>{pct(m.metrics.test?.direction_accuracy)}</td>
                       <td>{pct(m.metrics.test?.coverage)}</td>
                       <td>{money(m.metrics.test?.mean_width)}</td>
+                      <td>
+                        <EvidenceLabels evidence={m.metrics.reliability} />
+                      </td>
                       <td>
                         <span className={"pill" + (m.selected ? "" : " gray")}>
                           {m.selected
@@ -731,6 +748,24 @@ export function Training({
             {current.metrics.test.sample_count}；名义覆盖率：
             {pct(current.metrics.nominal_coverage)}。
           </p>
+          <EvidenceLabels evidence={current.metrics.reliability} />
+          <p className="section-note">
+            {current.metrics.reliability?.warnings?.join("；")}。
+            {current.metrics.reliability?.rules}
+          </p>
+          {current.metrics.search_at_boundary && (
+            <p className="note-box">
+              最佳Ridge参数位于设置的搜索边界。可扩大α范围后重新研究；本次不会越过你设置的上下限。
+            </p>
+          )}
+          {current.metrics.fitting_fallbacks?.length > 0 && (
+            <details>
+              <summary>拟合失败候选与回退记录</summary>
+              <pre>
+                {JSON.stringify(current.metrics.fitting_fallbacks, null, 2)}
+              </pre>
+            </details>
+          )}
           {current.family !== "naive" && (
             <>
               <h3 style={{ margin: "18px 0 10px" }}>
@@ -883,6 +918,8 @@ export function Training({
                       <th>有效预测点</th>
                       <th>MAE</th>
                       <th>价格匹配度</th>
+                      <th>覆盖率 / 宽度</th>
+                      <th>区间评分</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -896,6 +933,11 @@ export function Training({
                         <td>{fold.metrics.sample_count}</td>
                         <td>{score(fold.metrics.mae)}</td>
                         <td>{pct(fold.metrics.price_match)}</td>
+                        <td>
+                          {pct(fold.metrics.coverage)} /{" "}
+                          {money(fold.metrics.mean_width)}
+                        </td>
+                        <td>{score(fold.metrics.interval_score)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -903,6 +945,47 @@ export function Training({
               </div>
             </>
           )}
+          <h3>各预测目标的误差与区间</h3>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>目标</th>
+                  <th>MAE（元）</th>
+                  <th>实际覆盖率</th>
+                  <th>平均宽度（元）</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(current.metrics.test.mae_by_target || {}).map(
+                  ([field, value], index) => (
+                    <tr key={field}>
+                      <td>
+                        {(
+                          {
+                            open: "开盘",
+                            high: "最高",
+                            low: "最低",
+                            close: "收盘",
+                          } as Record<string, string>
+                        )[field] || field.replace("step_", "第") + "交易日收盘"}
+                      </td>
+                      <td>{score(value)}</td>
+                      <td>
+                        {pct(current.metrics.test.coverage_by_target?.[index])}
+                      </td>
+                      <td>
+                        {money(current.metrics.test.width_by_target?.[index])}
+                      </td>
+                    </tr>
+                  ),
+                )}
+              </tbody>
+            </table>
+          </div>
+          <p className="section-note">
+            匹配入选只检查周期终点收盘；开高低收与逐日路径需分别查看这些指标。统计时间序列模型的次日OHLC使用历史K线形态估计。
+          </p>
           <p className="note-box">
             {cvResult
               ? "本实验为已有历史数据内部时序交叉验证，可重复训练；没有额外独立测试。"
@@ -975,7 +1058,7 @@ export function Training({
           <p className="section-note">
             Ljung-Box p：{probability(diagnosis.ljung_box_pvalue)} · ARCH p：
             {probability(diagnosis.arch_pvalue)}
-            。检测误差自相关与波动聚集；p&gt;0.05不能证明模型可靠。旧报告为非连续抽样，长周期误差可能重叠，诊断仅作探索参考。
+            。检测误差自相关与波动聚集；p&gt;0.05不能证明模型可靠。存在抽样或跨折隔离缺口时不计算日频相关检验；长周期误差可能重叠，诊断仅作探索参考。
           </p>
           <details>
             <summary>滚动验证窗口与频域诊断</summary>

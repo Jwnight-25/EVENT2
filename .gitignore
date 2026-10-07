@@ -12,3 +12,7 @@ playwright-report/
 .DS_Store
 *.log
 backups/
+
+/event2-backups/
+/运行数据/
+/完整备份/

@@ -30,7 +30,7 @@ class TrainingRequest(SnapshotRequest):
         default_factory=lambda: ["next_day", "one_month", "three_months"], min_length=1, max_length=3
     )
     families: list[Literal["naive", "arima", "sarima", "ridge", "lightgbm", "garch", "nhits", "patchtst"]] = (
-        Field(default_factory=lambda: ["arima", "ridge"], min_length=1, max_length=8)
+        Field(default_factory=lambda: ["arima", "ridge", "sarima"], min_length=1, max_length=8)
     )
     max_trials: int = Field(default=8, ge=1, le=30)
     time_budget_seconds: int = Field(default=600, ge=10, le=21600)
@@ -38,9 +38,10 @@ class TrainingRequest(SnapshotRequest):
     match_threshold: float = Field(default=0.95, ge=0.5, le=1)
     trials_per_family: int | None = Field(default=None, ge=1, le=40)
     evaluation_samples: int = Field(default=128, ge=32, le=512)
-    search_profile: Literal["standard", "expanded"] = "standard"
+    tuning_samples: int = Field(default=96, ge=32, le=256)
+    search_profile: Literal["standard", "expanded", "adaptive"] = "adaptive"
     ridge_alpha_min: float = Field(default=0.01, gt=0, le=1e6)
-    ridge_alpha_max: float = Field(default=1000, gt=0, le=1e6)
+    ridge_alpha_max: float = Field(default=100000, gt=0, le=1e6)
     arima_max_order: int = Field(default=2, ge=1, le=3)
     coverage: float = Field(default=0.9, ge=0.7, le=0.99)
     min_improvement: float = Field(default=0.02, ge=0, le=0.5)
