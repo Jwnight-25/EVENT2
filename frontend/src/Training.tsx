@@ -31,7 +31,8 @@ export function Training({
   const [families, setFamilies] = useState(["arima", "ridge"]);
   const [trials, setTrials] = useState(6);
   const [budget, setBudget] = useState(1800);
-  const [mode, setMode] = useState("research");
+  const [mode, setMode] = useState("cross_validation");
+  const [matchThreshold, setMatchThreshold] = useState(95);
   const [profile, setProfile] = useState("standard");
   const [alphaMin, setAlphaMin] = useState(0.01);
   const [alphaMax, setAlphaMax] = useState(1000);
@@ -71,6 +72,12 @@ export function Training({
     [viewedRun?.id, version],
   );
   const researchResult = viewedRun?.config.evaluation_mode === "research";
+  const cvResult = viewedRun?.config.evaluation_mode === "cross_validation";
+  const evaluationLabel = cvResult
+    ? "15%交叉验证"
+    : researchResult
+      ? "研究评估"
+      : "历史测试";
   const { data: models, error: loadError } = useLoad(
     () =>
       stock && viewedRun
@@ -105,45 +112,55 @@ export function Training({
           ? 1
           : Infinity;
     }) || [];
-  const acceptanceRows = current
-    ? [
-        [
-          "验证MAE改善",
-          pct(validationGain),
-          "至少 " + pct(policy?.min_improvement ?? 0.02),
-          "validation_improvement",
-        ],
-        [
-          "最终评估MAE改善",
-          pct(current.metrics.improvement),
-          "至少 " + pct(policy?.min_improvement ?? 0.02),
-          "test_improvement",
-        ],
-        [
-          "最差验证窗口误差 / 基准",
-          score(Math.max(...windowRatios)),
-          "不超过 1.10",
-          "stable_windows",
-        ],
-        [
-          "实际覆盖率",
-          pct(current.metrics.test.coverage),
-          "至少 " + pct(policy?.min_coverage ?? 0.75),
-          "coverage",
-        ],
-        [
-          "区间宽度 / 基准",
-          baseline && baseline.metrics.test.mean_width > 1e-10
-            ? score(
-                current.metrics.test.mean_width /
-                  baseline.metrics.test.mean_width,
-              )
-            : "—",
-          "不超过 1.25",
-          "interval_width",
-        ],
-      ]
-    : [];
+  const acceptanceRows =
+    current && cvResult
+      ? [
+          [
+            "价格匹配度（100%－MAPE）",
+            pct(current.metrics.test.price_match),
+            "至少 " + pct(policy?.match_threshold ?? 0.95),
+            "price_match",
+          ],
+        ]
+      : current
+        ? [
+            [
+              "验证MAE改善",
+              pct(validationGain),
+              "至少 " + pct(policy?.min_improvement ?? 0.02),
+              "validation_improvement",
+            ],
+            [
+              "最终评估MAE改善",
+              pct(current.metrics.improvement),
+              "至少 " + pct(policy?.min_improvement ?? 0.02),
+              "test_improvement",
+            ],
+            [
+              "最差验证窗口误差 / 基准",
+              score(Math.max(...windowRatios)),
+              "不超过 1.10",
+              "stable_windows",
+            ],
+            [
+              "实际覆盖率",
+              pct(current.metrics.test.coverage),
+              "至少 " + pct(policy?.min_coverage ?? 0.75),
+              "coverage",
+            ],
+            [
+              "区间宽度 / 基准",
+              baseline && baseline.metrics.test.mean_width > 1e-10
+                ? score(
+                    current.metrics.test.mean_width /
+                      baseline.metrics.test.mean_width,
+                  )
+                : "—",
+              "不超过 1.25",
+              "interval_width",
+            ],
+          ]
+        : [];
   const { data: allDiagnostics } = useLoad(
     () =>
       current
@@ -174,14 +191,14 @@ export function Training({
           itemStyle: { color: "#acc698", borderRadius: [3, 3, 0, 0] },
         },
         {
-          name: researchResult ? "研究评估" : "历史测试",
+          name: evaluationLabel,
           type: "bar",
           data: models?.map((m) => m.metrics.test?.mae),
           itemStyle: { color: "#426f53", borderRadius: [3, 3, 0, 0] },
         },
       ],
     }),
-    [models, researchResult],
+    [models, evaluationLabel],
   );
   const lineOption = (
     values: number[] | undefined,
@@ -238,6 +255,7 @@ export function Training({
         time_budget_seconds: budget,
         horizons: trainHorizons,
         evaluation_mode: mode,
+        match_threshold: matchThreshold / 100,
         search_profile: profile,
         ridge_alpha_min: alphaMin,
         ridge_alpha_max: alphaMax,
@@ -296,10 +314,26 @@ export function Training({
           <label>
             评估模式
             <select value={mode} onChange={(e) => setMode(e.target.value)}>
+              <option value="cross_validation">
+                15%时序交叉验证 · 达标可预测
+              </option>
               <option value="research">研究调参 · 可重复训练</option>
               <option value="holdout">独立验收 · 同数据仅一次</option>
             </select>
           </label>
+          {mode === "cross_validation" && (
+            <label>
+              价格匹配度门槛（%）
+              <input
+                type="number"
+                min={50}
+                max={100}
+                step={0.1}
+                value={matchThreshold}
+                onChange={(e) => setMatchThreshold(Number(e.target.value))}
+              />
+            </label>
+          )}
         </div>
         <div className="check-group">
           {Object.entries(horizons).map(([value, label]) => (
@@ -365,7 +399,9 @@ export function Training({
               />
             </label>
             <label>
-              校准 / 评估点数上限
+              {mode === "cross_validation"
+                ? "每折校准点数上限（验证全量）"
+                : "校准 / 评估点数上限"}
               <input
                 type="number"
                 min={32}
@@ -415,10 +451,13 @@ export function Training({
           模型类型是算法选项，参数试验是同类算法的不同设置，保存版本是训练成功的产物。当前有
           {catalog?.filter((f) => f.available && f.id !== "naive").length ??
             "…"}
-          类模型的依赖已安装。每类保留滚动验证最佳参数；研究模式保存所有成功类型，独立验收先固定最多三个候选。缺少依赖的选项暂不可训练。
+          类模型的依赖已安装。每类保留调参最佳版本；交叉验证保存所有成功类型，匹配度达标后最多选三个用于预测。缺少依赖的选项暂不可训练。
         </p>
         <p className="section-note">
-          基准始终参与比较。时限涵盖所选周期的调参、校准和评估；延长时间需同时增加试验次数才会探索更多参数。研究模式可反复修改设置，其结果不作为新的独立测试，也不会替换已入选模型。缺少可选依赖会记录失败。
+          {mode === "cross_validation"
+            ? "最后15%历史数据按时间划分三折，每折只使用此前数据拟合与校准，长周期标签不跨折。以周期终点收盘MAPE计算价格匹配度，达到门槛即可通过验证；不要求额外独立数据，可重复训练。匹配度不是方向准确率或盈利概率。"
+            : "研究模式可反复调参但不入选；独立验收保留原有一次性规则。"}
+          基准始终参与比较。时限涵盖调参、校准和评估；延长时限需增加试验次数才会探索更多参数。
         </p>
         <div className="row" style={{ marginTop: 18 }}>
           <button
@@ -442,9 +481,11 @@ export function Training({
             <Play size={15} />
             {busy
               ? "提交中…"
-              : mode === "research"
-                ? "开始研究训练"
-                : "开始独立验收"}
+              : mode === "cross_validation"
+                ? "开始交叉验证训练"
+                : mode === "research"
+                  ? "开始研究训练"
+                  : "开始独立验收"}
           </button>
           <span className="muted">数据不足的周期会跳过并说明原因</span>
         </div>
@@ -464,7 +505,11 @@ export function Training({
             {compatibleRuns.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.created_at.slice(0, 16).replace("T", " ")} ·{" "}
-                {r.config.evaluation_mode === "research" ? "研究" : "独立验收"}{" "}
+                {r.config.evaluation_mode === "cross_validation"
+                  ? "交叉验证"
+                  : r.config.evaluation_mode === "research"
+                    ? "研究"
+                    : "独立验收"}{" "}
                 · {r.id.slice(0, 6)}
               </option>
             ))}
@@ -495,8 +540,9 @@ export function Training({
                 <thead>
                   <tr>
                     <th>模型 / 版本</th>
-                    <th>验证MAE</th>
-                    <th>{researchResult ? "研究MAE" : "测试MAE"}</th>
+                    <th>调参MAE</th>
+                    <th>{evaluationLabel}MAE</th>
+                    {cvResult && <th>价格匹配度</th>}
                     <th>改善</th>
                     <th>方向表现</th>
                     <th>实际覆盖</th>
@@ -518,6 +564,7 @@ export function Training({
                       </td>
                       <td>{score(m.metrics.validation?.mae)}</td>
                       <td>{score(m.metrics.test?.mae)}</td>
+                      {cvResult && <td>{pct(m.metrics.test?.price_match)}</td>}
                       <td>
                         {typeof m.metrics.improvement === "number"
                           ? (m.metrics.improvement * 100).toFixed(3) + "%"
@@ -529,20 +576,31 @@ export function Training({
                       <td>
                         <span className={"pill" + (m.selected ? "" : " gray")}>
                           {m.selected
-                            ? "已入选"
+                            ? m.metrics.evaluation_mode === "cross_validation"
+                              ? "交叉验证通过 · 已入选"
+                              : "已入选"
                             : m.family === "naive"
                               ? "比较基准"
                               : m.metrics.evaluation_mode === "research"
                                 ? m.metrics.passes_thresholds
                                   ? "研究达标 · 待独立验收"
                                   : "研究未达标"
-                                : "未入选"}
+                                : m.metrics.evaluation_mode ===
+                                    "cross_validation"
+                                  ? m.metrics.passes_thresholds
+                                    ? "交叉验证通过 · 非当前入选"
+                                    : "交叉验证未达标"
+                                  : "未入选"}
                         </span>
                         <small
                           className="muted"
                           style={{ display: "block", maxWidth: 240 }}
                         >
-                          {m.reason}
+                          {m.metrics.evaluation_mode === "cross_validation" &&
+                          m.metrics.passes_thresholds &&
+                          !m.selected
+                            ? "此版本匹配度达标；预测默认使用当前入选版本。"
+                            : m.reason}
                         </small>
                       </td>
                     </tr>
@@ -551,9 +609,20 @@ export function Training({
               </table>
             </div>
             <p className="section-note">
-              指标为各周期终点收盘价；入选要求验证和测试MAE改善至少{" "}
-              {pct(viewedRun?.config.min_improvement)}
-              ，各验证窗口劣化不超过10%，覆盖率不低于目标减15个百分点，区间宽度不超过基准1.25倍。研究模型不自动入选。方向表现包括涨、跌、持平；naive始终预测持平，其命中率不能用于比较涨跌判断能力。点击模型查看诊断。
+              {cvResult ? (
+                <>
+                  价格匹配度=max(0,100%－MAPE)，达到
+                  {pct(policy?.match_threshold ?? 0.95)}
+                  即可验证成功；最多三个达标模型入选预测。改善、覆盖和区间宽度为参考指标，不再要求独立验收。价格变化很小时基准也可能有很高匹配度，请同时比较误差改善。
+                </>
+              ) : (
+                <>
+                  指标为各周期终点收盘价；入选要求验证和测试MAE改善至少{" "}
+                  {pct(viewedRun?.config.min_improvement)}
+                  ，各验证窗口劣化不超过10%，覆盖率不低于目标减15个百分点，区间宽度不超过基准1.25倍。研究模型不自动入选。
+                </>
+              )}
+              方向表现包括涨、跌、持平；naive始终预测持平，其命中率不能用于比较涨跌判断能力。点击模型查看诊断。
             </p>
           </>
         ) : (
@@ -598,14 +667,16 @@ export function Training({
           </div>
           <p className="note-box">
             {current.reason}。参数：{JSON.stringify(current.parameters)}
-            。拟合截止：{current.metrics.fitted_through}；
-            {researchResult ? "研究评估" : "历史测试"}样本：
+            。拟合截止：{current.metrics.fitted_through}；{evaluationLabel}
+            样本：
             {current.metrics.test.sample_count}；名义覆盖率：
             {pct(current.metrics.nominal_coverage)}。
           </p>
           {current.family !== "naive" && (
             <>
-              <h3 style={{ margin: "18px 0 10px" }}>验收条件逐项核对</h3>
+              <h3 style={{ margin: "18px 0 10px" }}>
+                {cvResult ? "验证条件逐项核对" : "验收条件逐项核对"}
+              </h3>
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -635,25 +706,31 @@ export function Training({
                         </td>
                       </tr>
                     ))}
-                    <tr>
-                      <td>评估数据独立性</td>
-                      <td>
-                        {researchResult ? "重复历史研究" : "本版本一次性验收"}
-                      </td>
-                      <td>独立验收才可入选</td>
-                      <td
-                        className={
-                          researchResult ? "acceptance-fail" : "acceptance-pass"
-                        }
-                      >
-                        {researchResult ? "待新数据验证" : "符合当前流程"}
-                      </td>
-                    </tr>
+                    {!cvResult && (
+                      <tr>
+                        <td>评估数据独立性</td>
+                        <td>
+                          {researchResult ? "重复历史研究" : "本版本一次性验收"}
+                        </td>
+                        <td>独立验收才可入选</td>
+                        <td
+                          className={
+                            researchResult
+                              ? "acceptance-fail"
+                              : "acceptance-pass"
+                          }
+                        >
+                          {researchResult ? "待新数据验证" : "符合当前流程"}
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
               <p className="section-note">
-                五项误差和区间门槛全部通过，且属于独立验收，才标为“已入选”。研究达标表示通过工程门槛，仍需新的未使用数据；统计优势及可靠性另看下方检验，不能由入选标签保证。
+                {cvResult
+                  ? "本次采用已有历史数据内部交叉验证，匹配度达标即通过；不使用独立数据作为入选条件。统计检验和基准比较继续保留，验证通过不等于未来盈利。"
+                  : "五项误差和区间门槛全部通过，且属于独立验收，才标为已入选。研究模式的达标产物不自动入选。"}
               </p>
             </>
           )}
@@ -730,16 +807,55 @@ export function Training({
               </tbody>
             </table>
           </div>
+          {current.metrics.cross_validation && (
+            <>
+              <h3>最后15%历史数据 · 三折验证</h3>
+              <p className="section-note">
+                验证区段共{current.metrics.cross_validation.validation_bars}
+                根日线，每折的拟合与区间校准均早于该折验证数据。长周期完整标签留在折内，边界不完整的预测起点不计入评估。
+              </p>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>验证折</th>
+                      <th>拟合截止</th>
+                      <th>验证日期区段</th>
+                      <th>有效预测点</th>
+                      <th>MAE</th>
+                      <th>价格匹配度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {current.metrics.cross_validation.folds.map((fold: any) => (
+                      <tr key={fold.fold}>
+                        <td>第{fold.fold}折</td>
+                        <td>{fold.fitted_through}</td>
+                        <td>
+                          {fold.validation_start} — {fold.validation_end}
+                        </td>
+                        <td>{fold.metrics.sample_count}</td>
+                        <td>{score(fold.metrics.mae)}</td>
+                        <td>{pct(fold.metrics.price_match)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
           <p className="note-box">
-            {researchResult
-              ? "本实验重复使用历史评估数据，仅供研究。"
-              : "独立测试也不能保证未来表现。"}
+            {cvResult
+              ? "本实验为已有历史数据内部时序交叉验证，可重复训练；没有额外独立测试。"
+              : researchResult
+                ? "本实验重复使用历史评估数据，仅供研究。"
+                : "独立测试也不能保证未来表现。"}
             {current.metrics.assessment?.skill_test?.note}{" "}
             统计检验与是否通过误差门槛分开报告；目前没有足够证据保证价格预测可靠。
           </p>
           <div className="chart-grid" style={{ marginTop: 18 }}>
             <div className="subcard">
-              <h3>预测与实际 · {researchResult ? "研究评估" : "历史测试"}</h3>
+              <h3>预测与实际 · {evaluationLabel}</h3>
               <Chart
                 height={230}
                 option={{

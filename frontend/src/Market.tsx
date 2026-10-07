@@ -27,6 +27,7 @@ import {
   recentWindow,
   visibleIndices,
   zoomWindow,
+  panWindow,
   type WindowRange,
 } from "./chartUtils";
 
@@ -307,7 +308,6 @@ export function Market({
   const [mode, setMode] = useState("k");
   const [upload, setUpload] = useState(false);
   const [window, setWindow] = useState<WindowRange | null>(null);
-  const [vertical, setVertical] = useState<WindowRange>({ start: 0, end: 100 });
   const [dateStart, setDateStart] = useState("");
   const [dateEnd, setDateEnd] = useState("");
   const [priceMin, setPriceMin] = useState("");
@@ -353,17 +353,14 @@ export function Market({
   }
   function resetPrice() {
     setFixedPrices(null);
-    setVertical({ start: 0, end: 100 });
     setPriceMin("");
     setPriceMax("");
     setControlError("");
   }
   function onZoom(ranges: ChartZoom[]) {
-    const horizontal = ranges.find((r) => r.id === "market-time");
-    const price = ranges.find((r) => r.id === "market-price");
+    const horizontal = ranges.find((r) => r.id === "market-time-inside");
     if (horizontal)
       changeWindow({ start: horizontal.start, end: horizontal.end });
-    if (price) setVertical({ start: price.start, end: price.end });
   }
   const last = rows.at(-1);
   const previous = rows.at(-2);
@@ -451,44 +448,6 @@ export function Market({
           throttle: 50,
           preventDefaultMouseMove: true,
         },
-        {
-          type: "slider" as const,
-          id: "market-time",
-          xAxisIndex: [0, 1],
-          start: range.start,
-          end: range.end,
-          bottom: 8,
-          left: 76,
-          right: 18,
-          height: 28,
-          handleSize: "110%",
-          moveHandleSize: 8,
-          brushSelect: false,
-          throttle: 50,
-          handleStyle: { color: "#426f53", borderColor: "#426f53" },
-          fillerColor: "rgba(130,165,110,0.18)",
-          borderColor: "#e6eae2",
-        },
-        {
-          type: "slider",
-          id: "market-price",
-          yAxisIndex: 0,
-          orient: "vertical",
-          left: 2,
-          top: 30,
-          height: "58%",
-          width: 14,
-          start: vertical.start,
-          end: vertical.end,
-          filterMode: "none",
-          showDataShadow: false,
-          showDetail: false,
-          brushSelect: false,
-          handleSize: "140%",
-          handleStyle: { color: "#426f53" },
-          fillerColor: "rgba(130,165,110,0.16)",
-          throttle: 50,
-        },
       ],
       series: [
         mode === "k"
@@ -525,16 +484,7 @@ export function Market({
         },
       ],
     }),
-    [
-      data,
-      mode,
-      range.start,
-      range.end,
-      prices.min,
-      prices.max,
-      vertical.start,
-      vertical.end,
-    ],
+    [data, mode, range.start, range.end, prices.min, prices.max],
   );
   return (
     <>
@@ -779,7 +729,6 @@ export function Market({
                       return;
                     }
                     setFixedPrices({ min, max });
-                    setVertical({ start: 0, end: 100 });
                     setControlError("");
                   }}
                 >
@@ -793,13 +742,7 @@ export function Market({
             <p className="section-note" aria-live="polite">
               可见时间：{rows[firstIndex]?.time} — {rows[lastIndex]?.time} ·{" "}
               {lastIndex - firstIndex + 1}根K线；价格视窗：¥
-              {money(
-                prices.min + ((prices.max - prices.min) * vertical.start) / 100,
-              )}{" "}
-              —{" "}
-              {money(
-                prices.min + ((prices.max - prices.min) * vertical.end) / 100,
-              )}
+              {money(prices.min)} — {money(prices.max)}
               {fixedPrices ? "（手动）" : "（自动基准）"}。
             </p>
             {controlError && <p className="error">{controlError}</p>}
@@ -823,9 +766,66 @@ export function Market({
           </Empty>
         )}
         {rows.length > 0 && (
-          <p className="section-note">
-            滚轮或触控板捏合缩放；按住图内左右拖动，或拖底部横栏移动时间窗口，两端手柄调整跨度。左侧竖栏调整价格轴。成交量按收盘对比上一周期收盘：红涨、绿跌、灰平，首根对比开盘。
-          </p>
+          <>
+            <div className="time-scrollbar">
+              <label>
+                横向时间滑条 · 保持当前K线跨度
+                <input
+                  type="range"
+                  aria-label="横向时间滑条"
+                  min={0}
+                  max={Math.max(0, rows.length - (lastIndex - firstIndex + 1))}
+                  step={1}
+                  value={firstIndex}
+                  disabled={lastIndex - firstIndex + 1 >= rows.length}
+                  onChange={(e) =>
+                    changeWindow(
+                      panWindow(rows.length, range, Number(e.target.value)),
+                    )
+                  }
+                />
+              </label>
+              <div className="row">
+                <button
+                  className="secondary"
+                  disabled={firstIndex === 0}
+                  onClick={() =>
+                    changeWindow(
+                      panWindow(
+                        rows.length,
+                        range,
+                        firstIndex - (lastIndex - firstIndex + 1),
+                      ),
+                    )
+                  }
+                >
+                  前一窗口
+                </button>
+                <span className="muted">
+                  {rows[0]?.time.slice(0, 10)} —{" "}
+                  {rows.at(-1)?.time.slice(0, 10)}
+                </span>
+                <button
+                  className="secondary"
+                  disabled={lastIndex === rows.length - 1}
+                  onClick={() =>
+                    changeWindow(
+                      panWindow(
+                        rows.length,
+                        range,
+                        firstIndex + (lastIndex - firstIndex + 1),
+                      ),
+                    )
+                  }
+                >
+                  后一窗口
+                </button>
+              </div>
+            </div>
+            <p className="section-note">
+              拖动横向时间滑条查看前后行情，或按住图内左右拖动；滚轮与放大缩小按钮调整时间跨度。价格轴自动适配，也可填写上下限。成交量按收盘对比上一周期收盘：红涨、绿跌、灰平，首根对比开盘。
+            </p>
+          </>
         )}
       </section>
       <div className="notice">

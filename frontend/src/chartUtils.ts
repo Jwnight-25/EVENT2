@@ -44,6 +44,18 @@ export function zoomWindow(
   return { start, end: start + width };
 }
 
+export function panWindow(
+  count: number,
+  range: WindowRange,
+  first: number,
+): WindowRange {
+  const [start, end] = visibleIndices(count, range);
+  const size = end - start;
+  const next = clamp(Math.round(first), 0, Math.max(0, count - 1 - size));
+  const last = Math.max(1, count - 1);
+  return { start: (next / last) * 100, end: ((next + size) / last) * 100 };
+}
+
 export function rangeForDates(
   rows: Bar[],
   start: string,

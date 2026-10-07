@@ -11,6 +11,7 @@ import {
   rangeForDates,
   visibleIndices,
   priceBounds,
+  panWindow,
 } from "../src/chartUtils.ts";
 import { summarizePath } from "../src/forecastSummary.ts";
 
@@ -70,6 +71,26 @@ test("auto price axis follows visible candles, not off-screen extremes", () => {
   const bounds = priceBounds(rows, { start: 50, end: 100 });
   assert.ok(bounds.max > 12 && bounds.max < 20);
   assert.ok(bounds.min < 8 && bounds.min >= 0);
+});
+
+test("horizontal scrollbar preserves span and stops at both history boundaries", () => {
+  const range = recentWindow(2611);
+  assert.deepEqual(
+    visibleIndices(2611, panWindow(2611, range, 1000)),
+    [1000, 1119],
+  );
+  assert.deepEqual(
+    visibleIndices(2611, panWindow(2611, range, -100)),
+    [0, 119],
+  );
+  assert.deepEqual(
+    visibleIndices(2611, panWindow(2611, range, 10000)),
+    [2491, 2610],
+  );
+  assert.deepEqual(panWindow(2611, { start: 0, end: 100 }, 1000), {
+    start: 0,
+    end: 100,
+  });
 });
 
 test("forecast summary distinguishes point extrema, end interval and interval envelope", () => {

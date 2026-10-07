@@ -69,6 +69,7 @@ def test_training_prediction_and_unseen_test_guard(client):
     identifier = stock(client)
     history_upload(client, identifier)
     body = {
+        "evaluation_mode": "holdout",
         "stock_id": identifier,
         "horizons": ["next_day"],
         "families": ["ridge"],
@@ -110,6 +111,7 @@ def test_no_model_passes_on_flat_series_and_cancel(client):
     identifier = stock(client)
     history_upload(client, identifier, flat=True)
     request = {
+        "evaluation_mode": "holdout",
         "stock_id": identifier,
         "horizons": ["next_day"],
         "families": ["ridge"],
@@ -157,6 +159,7 @@ def test_spawned_worker_and_long_horizon_paths(client):
     response = client.post(
         "/api/v1/training-runs",
         json={
+            "evaluation_mode": "holdout",
             "stock_id": identifier,
             "horizons": ["one_month", "three_months"],
             "families": ["ridge"],

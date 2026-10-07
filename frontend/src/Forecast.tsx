@@ -86,7 +86,12 @@ export function Forecast({
   const defaults =
     models
       ?.filter((m) => m.run_id === models[0]?.run_id && m.family !== "naive")
-      .sort((a, b) => a.metrics.validation.mae - b.metrics.validation.mae)
+      .sort((a, b) =>
+        a.metrics.evaluation_mode === "cross_validation" &&
+        b.metrics.evaluation_mode === "cross_validation"
+          ? b.metrics.test.price_match - a.metrics.test.price_match
+          : a.metrics.validation.mae - b.metrics.validation.mae,
+      )
       .slice(0, 3)
       .map((m) => m.id) || [];
   const activeIds = selected ?? defaults;
@@ -226,7 +231,7 @@ export function Forecast({
                 setChosen(null);
               }}
             >
-              <option value="qualified">已通过验收的模型</option>
+              <option value="qualified">已通过验证的模型</option>
               <option value="research">全部模型 · 研究试算</option>
             </select>
           </label>
@@ -295,13 +300,20 @@ export function Forecast({
                 }}
               />
               {m.family} · {m.id.slice(0, 6)} ·{" "}
-              {m.selected ? "已入选" : "未验收 / 研究"} · MAE{" "}
-              {money(m.metrics.test?.mae)}
+              {m.selected
+                ? m.metrics.evaluation_mode === "cross_validation"
+                  ? "交叉验证通过"
+                  : "已入选"
+                : m.metrics.evaluation_mode === "cross_validation" &&
+                    m.metrics.passes_thresholds
+                  ? "验证通过 · 非当前入选"
+                  : "未验证 / 研究"}{" "}
+              · MAE {money(m.metrics.test?.mae)}
             </label>
           ))}
         </div>
         <p className="section-note">
-          默认按最近实验的验证MAE选择最多三个非基准模型，也可手动调整。每次预测都会保存模型版本、输入数据和数值结果。下一交易日预测OHLC；20
+          默认选择最近实验最多三个非基准模型，交叉验证模式按价格匹配度优先，也可手动调整。每次预测都会保存模型版本、输入数据和数值结果。下一交易日预测OHLC；20
           / 60交易日预测每日收盘路径和区间。
         </p>
         {experimental && (
@@ -363,6 +375,11 @@ export function Forecast({
                 {money(endpoint?.lower)} — {money(endpoint?.upper)}
               </p>
               <ul>
+                {first.evaluation_mode === "cross_validation" && (
+                  <li>
+                    15%交叉验证匹配度：{pct(first.validation_price_match)}
+                  </li>
+                )}
                 <li>目标覆盖率：{pct(first.nominal_coverage)}</li>
                 <li>历史实际覆盖：{pct(first.historical_coverage)}</li>
                 <li>
@@ -374,6 +391,8 @@ export function Forecast({
                 <li>到区间上沿：{pct(first.target_upside?.upper)}</li>
               </ul>
               <p className="section-note">
+                {first.evaluation_mode === "cross_validation" &&
+                  "该模型通过已有历史数据内部交叉验证；匹配度不是方向准确率或盈利概率。"}
                 10%仅为观察阈值。区间上沿不是未来最高价，也不代表继续持有条件。
               </p>
             </aside>

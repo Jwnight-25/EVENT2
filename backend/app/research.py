@@ -24,7 +24,7 @@ from .market import load_snapshot
 from .calendar import future_dates
 
 STEPS = {"next_day": 1, "one_month": 20, "three_months": 60}
-VERSION = "direct-multistep-v2"
+VERSION = "direct-multistep-v3"
 
 
 def relative_improvement(error, baseline):
@@ -228,14 +228,23 @@ def fit(rows, features, end, horizon, family, parameters, seed):
         log_close = np.log([r["close"] for r in rows[: end + 1]])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            estimator = ARIMA(
+            specification = ARIMA(
                 log_close,
                 order=tuple(parameters["order"]),
                 seasonal_order=tuple(parameters.get("seasonal_order", [0, 0, 0, 0])),
-            ).fit(method_kwargs={"maxiter": 80})
+            )
+            estimator = specification.fit(method_kwargs={"maxiter": 80})
+            retried = not estimator.mle_retvals.get("converged", True)
+            if retried:
+                estimator = specification.fit(start_params=estimator.params, method_kwargs={"maxiter": 400})
         if not estimator.mle_retvals.get("converged", True):
             raise ValueError("统计模型未收敛")
         artifact["estimator"] = estimator
+        artifact["fit_diagnostics"] = {
+            "converged": True,
+            "optimizer_retry": retried,
+            "max_iterations": 400 if retried else 80,
+        }
         if family == "garch":
             from arch import arch_model
 
@@ -386,6 +395,7 @@ def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None,
     base_prices = np.array([rows[i]["close"] for i in origins])
     metric = {
         "mae": float(np.mean(np.abs(actuals - estimates))),
+        "mape": float(np.mean(np.abs(actuals - estimates) / actuals)),
         "rmse": float(np.sqrt(np.mean((actuals - estimates) ** 2))),
         "direction_accuracy": float(
             np.mean(np.sign(estimates - base_prices) == np.sign(actuals - base_prices))
@@ -400,6 +410,7 @@ def evaluate(artifact, rows, features, start, end, job_id, deadline, width=None,
         "bias": float(np.mean(actuals - estimates)),
         "mase": None,
     }
+    metric["price_match"] = max(0.0, 1 - metric["mape"])
     scale = np.mean(np.abs(np.diff([r["close"] for r in rows[: artifact["fit_end"] + 1]])))
     if scale > 1e-12:
         metric["mase"] = metric["mae"] / float(scale)
@@ -461,7 +472,11 @@ def diagnose(series, rows):
         "skew": float(skew(residuals)) if np.std(residuals) > 0 else 0.0,
         "kurtosis": float(kurtosis(residuals)) if np.std(residuals) > 0 else 0.0,
     }
-    if np.std(residuals) > 1e-12 and nlags > 0:
+    origins = series.get("origin_indices", [])
+    contiguous = not origins or np.all(np.diff(origins) == 1)
+    if not contiguous:
+        result["notes"] += "各折间有多步标签隔离缺口，不对拼接残差计算日频ACF/PACF及Ljung-Box/ARCH检验。"
+    if contiguous and np.std(residuals) > 1e-12 and nlags > 0:
         result["acf"] = acf(residuals, nlags=nlags, fft=False).tolist()
         try:
             result["pacf"] = pacf(residuals, nlags=nlags, method="ywm").tolist()
@@ -502,11 +517,12 @@ def load_artifact(model):
 
 def nominate_families(family_best, mode):
     ordered = sorted([f for f in family_best if f != "naive"], key=lambda f: family_best[f]["score"])
-    return ordered if mode == "research" else ordered[:3]
+    return ordered if mode in ("research", "cross_validation") else ordered[:3]
 
 
 def train_job(job_id):
     from .assessment import assess_models, CHECK_LABELS
+    from .cross_validation import fold_boundaries, validate_family
 
     with SessionLocal() as db:
         job = db.get(Job, job_id)
@@ -525,7 +541,9 @@ def train_job(job_id):
     report = {
         "version": VERSION,
         "evaluation_mode": mode,
-        "evaluation_note": "可反复调参，评估结果仅供研究，不再视作独立测试"
+        "evaluation_note": "最后15%历史数据进行三折时序验证；匹配度达标可入选，可重复训练，不要求额外独立数据"
+        if mode == "cross_validation"
+        else "可反复调参，评估结果仅供研究，不再视作独立测试"
         if mode == "research"
         else "本数据版本该周期只允许一次最终测试；通过门槛不等于可靠性证明",
         "provenance": provenance(),
@@ -534,12 +552,16 @@ def train_job(job_id):
             "min_coverage": config["coverage"] - 0.15,
             "max_width_ratio": 1.25,
             "max_selected": 3,
+            "match_threshold": config.get("match_threshold", 0.95),
+            "acceptance_basis": "price_match" if mode == "cross_validation" else "error_and_interval_checks",
         },
         "split": {
             "train_end": rows[train_end]["time"],
             "validation_end": rows[val_end]["time"],
             "calibration_end": rows[cal_end]["time"],
             "test_end": rows[test_end]["time"],
+            "final_validation_start": rows[cal_end + 1]["time"],
+            "final_validation_fraction": 0.15,
         },
         "horizons": {},
         "limits": [
@@ -557,6 +579,12 @@ def train_job(job_id):
     for horizon in dict.fromkeys(config["horizons"]):
         steps = STEPS[horizon]
         middle = (train_end + val_end) // 2
+        if mode == "cross_validation":
+            try:
+                fold_boundaries(n, steps)
+            except ValueError as exc:
+                report["horizons"][horizon] = {"status": "insufficient_data", "message": str(exc)}
+                continue
         if (
             min(middle - train_end, val_end - middle, cal_end - val_end, test_end - cal_end) < steps + 8
             or train_end - steps < 100
@@ -627,7 +655,9 @@ def train_job(job_id):
         if exhausted:
             report["horizons"][horizon] = {
                 "status": "budget_exhausted",
-                "message": "预算用尽，本周期未进行最终验收",
+                "message": "预算用尽，本周期未完成交叉验证"
+                if mode == "cross_validation"
+                else "预算用尽，本周期未进行最终验收",
             }
             break
         if "naive" not in family_best:
@@ -642,42 +672,51 @@ def train_job(job_id):
             settings = family_best[family]
             try:
                 checkpoint(job_id, f"校准及验收 {horizon} · {family}", deadline=deadline)
-                artifact = fit(
-                    rows, features, val_end, horizon, family, settings["parameters"], config["seed"]
-                )
-                artifact["coverage"] = config["coverage"]
-                _, cal_errors, _ = evaluate(
-                    artifact, rows, features, val_end + 1, cal_end, job_id, deadline, max_samples=samples
-                )
-                quantile = min(1.0, np.ceil((len(cal_errors) + 1) * config["coverage"]) / len(cal_errors))
-                width = np.quantile(np.abs(cal_errors), quantile, axis=0, method="higher")
-                artifact["width"] = width
                 report["test_started_horizons"] = list(
                     set(report.get("test_started_horizons", []) + [horizon])
                 )
                 with SessionLocal() as db:
                     db.get(TrainingRun, run_id).report = report
                     db.commit()
-                test_metric, _, series = evaluate(
-                    artifact,
-                    rows,
-                    features,
-                    cal_end + 1,
-                    test_end,
-                    job_id,
-                    deadline,
-                    width,
-                    max_samples=samples,
-                )
+                cv_details = None
+                if mode == "cross_validation":
+                    artifact, test_metric, series, cv_details, calibration_count = validate_family(
+                        rows, features, horizon, family, settings, config, job_id, deadline
+                    )
+                else:
+                    artifact = fit(
+                        rows, features, val_end, horizon, family, settings["parameters"], config["seed"]
+                    )
+                    artifact["coverage"] = config["coverage"]
+                    _, cal_errors, _ = evaluate(
+                        artifact, rows, features, val_end + 1, cal_end, job_id, deadline, max_samples=samples
+                    )
+                    quantile = min(1.0, np.ceil((len(cal_errors) + 1) * config["coverage"]) / len(cal_errors))
+                    width = np.quantile(np.abs(cal_errors), quantile, axis=0, method="higher")
+                    artifact["width"] = width
+                    calibration_count = len(cal_errors)
+                    test_metric, _, series = evaluate(
+                        artifact,
+                        rows,
+                        features,
+                        cal_end + 1,
+                        test_end,
+                        job_id,
+                        deadline,
+                        width,
+                        max_samples=samples,
+                    )
                 metrics = {
                     "evaluation_mode": mode,
                     "validation": {"mae": settings["score"], "windows": settings["windows"]},
                     "test": test_metric,
                     "nominal_coverage": config["coverage"],
-                    "calibration_samples": len(cal_errors),
-                    "fitted_through": rows[val_end]["time"],
+                    "calibration_samples": calibration_count,
+                    "fitted_through": rows[artifact["fit_end"]]["time"],
                     "steps": steps,
                 }
+                if cv_details:
+                    metrics["cross_validation"] = cv_details
                 model_id = uid()
                 path, checksum = save_artifact(artifact, model_id)
                 model = Model(
@@ -691,7 +730,7 @@ def train_job(job_id):
                     selected=False,
                     parameters=settings["parameters"],
                     metrics=metrics,
-                    diagnostics=diagnose(series, rows[: val_end + 1]),
+                    diagnostics=diagnose(series, rows[: artifact["fit_end"] + 1]),
                     artifact_path=path,
                     artifact_checksum=checksum,
                     reason="基准仅用于比较" if family == "naive" else "等待验收",
@@ -739,6 +778,14 @@ def train_job(job_id):
                 "acceptance_checks": checks,
                 "passes_thresholds": all(checks.values()),
             }
+            if mode == "cross_validation":
+                matches = metric["price_match"] >= config["match_threshold"]
+                model.metrics = {
+                    **model.metrics,
+                    "reference_checks": checks,
+                    "acceptance_checks": {"price_match": matches},
+                    "passes_thresholds": matches,
+                }
             model.selected = mode == "holdout" and all(checks.values())
             model.reason = (
                 "通过预设验收规则；不代表已证明可靠"
@@ -751,6 +798,22 @@ def train_job(job_id):
                     + "、".join(CHECK_LABELS[key] for key, passed in checks.items() if not passed)
                 )
             )
+        if mode == "cross_validation":
+            qualified = sorted(
+                [m for m in local_models if m.family != "naive" and m.metrics["passes_thresholds"]],
+                key=lambda m: (-m.metrics["test"]["price_match"], m.metrics["test"]["mae"], m.family),
+            )
+            for model in local_models:
+                if model.family == "naive":
+                    continue
+                model.selected = model in qualified[:3]
+                model.reason = (
+                    "通过15%历史数据时序交叉验证；匹配度达标，已入选预测"
+                    if model.selected
+                    else "交叉验证通过；本周期保留匹配度最高的三个模型"
+                    if model.metrics["passes_thresholds"]
+                    else "未通过：15%交叉验证价格匹配度低于设定门槛"
+                )
         evidence = assess_models(local_models, rows, steps)
         for model in local_models:
             model.metrics = {**model.metrics, "assessment": evidence[model.id]}
@@ -762,7 +825,9 @@ def train_job(job_id):
             "nominees": nominees,
             "trials": trial_count,
             "trials_by_family": family_counts,
-            "message": "研究实验完成；模型仅供研究选择"
+            "message": "15%时序交叉验证完成"
+            if mode == "cross_validation"
+            else "研究实验完成；模型仅供研究选择"
             if mode == "research"
             else "没有模型达标"
             if not any(m.selected for m in local_models)
@@ -771,7 +836,7 @@ def train_job(job_id):
     checkpoint(job_id, "保存实验、模型与验收结果", 95)
     report["elapsed_seconds"] = round(time.monotonic() - started, 2)
     with SessionLocal() as db:
-        for horizon in completed_horizons if mode == "holdout" else []:
+        for horizon in completed_horizons if mode in ("holdout", "cross_validation") else []:
             for old in db.scalars(
                 select(Model).where(
                     Model.stock_id == stock_id,
@@ -845,6 +910,7 @@ def prediction_job(job_id):
                 "ohlc_intervals": ohlc_intervals,
                 "nominal_coverage": artifact["coverage"],
                 "historical_coverage": model.metrics["test"]["coverage"],
+                "validation_price_match": model.metrics["test"].get("price_match"),
                 "interval_type": "marginal_empirical",
                 "target_upside": {
                     "lower": float(low[-1] / reference - 1),

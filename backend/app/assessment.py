@@ -12,6 +12,7 @@ CHECK_LABELS = {
     "stable_windows": "部分验证窗口比基准差超过10%",
     "coverage": "实际覆盖率低于门槛",
     "interval_width": "区间比基准宽超过25%",
+    "price_match": "15%交叉验证价格匹配度低于门槛",
 }
 
 
@@ -37,7 +38,7 @@ def compare_errors(series, baseline, steps):
         return {
             **result,
             "status": "irregular_sampling",
-            "note": "旧报告为非连续抽样，未计算日频优势检验p值；请查看新研究实验。",
+            "note": "评估起点存在抽样或多步跨折隔离缺口，不对拼接序列计算日频优势检验p值。",
         }
     nonoverlap = len(origins[::steps])
     result["nonoverlap_sample_count"] = nonoverlap

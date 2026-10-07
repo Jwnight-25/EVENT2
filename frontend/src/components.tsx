@@ -57,7 +57,7 @@ export function Chart({
   }, []);
   useEffect(() => {
     instance.current?.setOption(option, {
-      replaceMerge: preserveSeries ? [] : ["series"],
+      replaceMerge: preserveSeries ? ["dataZoom"] : ["series", "dataZoom"],
       lazyUpdate: false,
     });
   }, [option, preserveSeries]);

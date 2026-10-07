@@ -27,3 +27,4 @@ def test_research_can_archive_more_than_three_types_without_expanding_holdout_ca
     winners = {name: {"score": score} for name, score in scores.items()}
     assert nominate_families(winners, "holdout") == ["arima", "lightgbm", "sarima"]
     assert nominate_families(winners, "research") == ["arima", "lightgbm", "sarima", "ridge", "garch"]
+    assert nominate_families(winners, "cross_validation") == ["arima", "lightgbm", "sarima", "ridge", "garch"]

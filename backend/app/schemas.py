@@ -34,7 +34,8 @@ class TrainingRequest(SnapshotRequest):
     )
     max_trials: int = Field(default=8, ge=1, le=30)
     time_budget_seconds: int = Field(default=600, ge=10, le=21600)
-    evaluation_mode: Literal["holdout", "research"] = "holdout"
+    evaluation_mode: Literal["cross_validation", "holdout", "research"] = "cross_validation"
+    match_threshold: float = Field(default=0.95, ge=0.5, le=1)
     trials_per_family: int | None = Field(default=None, ge=1, le=40)
     evaluation_samples: int = Field(default=128, ge=32, le=512)
     search_profile: Literal["standard", "expanded"] = "standard"
