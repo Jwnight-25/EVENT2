@@ -11,6 +11,7 @@
 - `compose.yaml`：可选PostgreSQL本机服务。
 - `docs/implementation.md`：已实现能力、实验方法、接口预留和限制。
 - `docs/example-data.md`：本机招商银行样例的数据范围、格式、存储位置和核验结果。
+- `docs/ruyi-example-data.md`：本机儒意电影（002739）日线、第二来源核对、历史缺口和完整备份记录。
 
 ## 安装与启动
 
