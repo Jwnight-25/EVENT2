@@ -55,7 +55,7 @@ async def lifespan(_):
     engine.dispose()
 
 
-app = FastAPI(title="EVENT2 · 股票研究", version="0.9.0", lifespan=lifespan)
+app = FastAPI(title="EVENT2 · 股票研究", version="0.10.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -88,7 +88,10 @@ async def request_id(request: Request, call_next):
                 "request_id": request.state.request_id,
             },
         )
-    if request.method == "POST" and not request.url.path.startswith(API_PREFIX + "/maintenance/backups"):
+    owns_storage_lock = request.url.path.startswith(API_PREFIX + "/maintenance/backups") or (
+        request.url.path.startswith(API_PREFIX + "/market-updates/") and request.url.path.endswith("/check")
+    )
+    if request.method == "POST" and not owns_storage_lock:
         from .storage import storage_lock
 
         try:
@@ -673,6 +676,20 @@ def maintenance_status(db: DB, stock_id: str, price_basis: PriceBasis = "raw"):
     from .maintenance import data_status
 
     return data_status(db, stock_id, price_basis)
+
+
+@app.get(API_PREFIX + "/market-updates/{stock_id}")
+def market_update_status(stock_id: str, db: DB):
+    from .market_updates import update_status
+
+    return update_status(db, stock_id)
+
+
+@app.post(API_PREFIX + "/market-updates/{stock_id}/check")
+def market_update_check(stock_id: str):
+    from .market_updates import update_due
+
+    return update_due(stock_id, force=True)
 
 
 @app.post(API_PREFIX + "/maintenance/backups", status_code=201)

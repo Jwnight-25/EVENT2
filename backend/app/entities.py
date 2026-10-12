@@ -171,3 +171,25 @@ class TradingPreference(Base):
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class MarketFeed(Base):
+    __tablename__ = "market_feeds"
+    stock_id: Mapped[str] = mapped_column(ForeignKey("stocks.id"), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    price_basis: Mapped[str] = mapped_column(String(16), default="raw")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    source_import_id: Mapped[str] = mapped_column(ForeignKey("imports.id"))
+    last_completed_session: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class MarketUpdateRun(Record, Base):
+    __tablename__ = "market_update_runs"
+    stock_id: Mapped[str] = mapped_column(ForeignKey("market_feeds.stock_id"), index=True)
+    session_date: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    started_at: Mapped[str] = mapped_column(String(40), default=now)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)

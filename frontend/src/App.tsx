@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   ChartCandlestick,
@@ -34,6 +34,24 @@ export default function App() {
     true,
   );
   const stock = stocks?.find((s) => s.id === stockId) || stocks?.[0];
+  useEffect(() => {
+    if (!stocks) return;
+    let active = true;
+    const fingerprint = (items: Stock[]) =>
+      items.map((item) => `${item.id}:${item.data_cutoff}`).join("|");
+    const timer = window.setInterval(async () => {
+      try {
+        const latest = await api<Stock[]>("/stocks");
+        if (active && fingerprint(latest) !== fingerprint(stocks)) refresh();
+      } catch {
+        // Keep the current chart when the local service is temporarily unavailable.
+      }
+    }, 60000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [stocks]);
   return (
     <div className="app">
       <aside className="sidebar" aria-label="研究工作台侧栏">

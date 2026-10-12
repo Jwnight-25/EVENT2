@@ -1,4 +1,4 @@
-# 实现说明（v0.9）
+# 实现说明（v0.10）
 
 日期：2026-10-07。需求原稿位于requirements目录，保持基线；本文件解释当前实现及差异。
 
@@ -130,3 +130,14 @@ PostgreSQL需要与服务器兼容的pg_dump，输出database.dump；恢复需pg
 本机已导入招商银行600036样例，来源和范围见example-data.md。旧实验只有32个抽样评估点，模型均未通过改善门槛。2026-10-07新交叉验证实验使用最后392根日线，1/20/60步有效评估点分别为392/335/215，耗时30.80秒。95%匹配门槛下，下一交易日和一个月各有Ridge、SARIMA两类通过；三个月最高匹配度约94.49%，没有强行入选。次日两个模型的MAE仍略差于naive，匹配达标不能解释为优于基准。ARMA本轮部分折拟合重试后仍未收敛，失败原因保留。
 
 统计方法参考：[时序交叉验证](https://otexts.com/fpp3/tscv.html)、[按时间顺序划分与隔离](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html)、[MAPE定义](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.mean_absolute_percentage_error.html)、[残差诊断的用途与限制](https://otexts.com/fpp3/diagnostics.html)、[Statsmodels HAC协方差](https://www.statsmodels.org/stable/generated/statsmodels.stats.sandwich_covariance.cov_hac.html)。
+
+
+## 每日收盘行情更新（v0.10）
+
+新增market_feeds固定每只股票最早可核验日线导入的供应商，market_update_runs记录收盘日、执行状态、差异、错误和材料路径。Tencent和Eastmoney使用固定公开HTTPS地址，价格口径保持raw，成交量从手统一为股；不随之后的手工导入自动切换供应商，不从备用来源悄悄补数。
+
+macOS LaunchAgent每5分钟运行manage update-market，在Asia/Shanghai交易日15:30后检查最近完整收盘日。成功日不重复抓取；启动和唤醒后补齐截止日之后的可获取日线。失败或缺少当日行情间隔15分钟重试，同一目标日自动最多6次；可主动重试未完成日。周末、节假日不抓取新的未收盘日线；日历不覆盖时明确停止。原始响应、请求时间、哈希、CSV和结果纳入audits及完整备份。
+
+更新采用进程文件锁、PostgreSQL专用advisory锁及存储独占锁，与计算/备份/手工写入互斥。复用既有导入预检和修订表，仅追加新日期；重合日期价格或量额发生冲突时暂停整批写入并保存差异。崩溃后重查，已写日期通过重复判定保护；不会改写快照、模型、实验或预测。
+
+前端每60秒核对股票数据截止，只有变化时刷新；数据与备份增加固定来源、下次检查、最近执行记录和手动检查入口。此功能只更新行情，不自动训练、预测、AI解释或交易。免费公开接口不保证可用；Mac关机、休眠或未登录期间不会执行，恢复后补齐。部署和服务维护见[每日收盘更新](每日收盘更新.md)。

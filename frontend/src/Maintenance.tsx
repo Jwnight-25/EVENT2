@@ -2,6 +2,14 @@ import { useState } from "react";
 import { api, post, type Stock } from "./api";
 import { Modal, useLoad } from "./components";
 
+const updateLabels: Record<string, string> = {
+  succeeded: "完成",
+  waiting: "等待行情",
+  failed: "失败",
+  running: "更新中",
+  interrupted: "上次中断",
+};
+
 export function Maintenance({
   stock,
   basis,
@@ -18,15 +26,14 @@ export function Maintenance({
   const [source, setSource] = useState("");
   const [file, setFile] = useState<File>();
   const [volumeUnit, setVolumeUnit] = useState("shares");
-  const { data, error: loadError } = useLoad(
-    () =>
-      stock
-        ? api<any>(
-            `/maintenance/status?stock_id=${stock.id}&price_basis=${basis}`,
-          )
-        : Promise.resolve(undefined),
-    [stock?.id, basis, version],
-  );
+  const { data, error: loadError } = useLoad(async () => {
+    if (!stock) return undefined;
+    const [status, updates] = await Promise.all([
+      api<any>(`/maintenance/status?stock_id=${stock.id}&price_basis=${basis}`),
+      api<any>(`/market-updates/${stock.id}`),
+    ]);
+    return { ...status, updates };
+  }, [stock?.id, basis, version]);
   async function act(action: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -44,6 +51,74 @@ export function Maintenance({
     <Modal title="数据与备份" close={close}>
       {data && (
         <>
+          <h3>每日收盘更新</h3>
+          {data.updates.configured ? (
+            <>
+              <p className="note-box">
+                固定来源：{data.updates.provider_label} · 不复权日线
+                <br />
+                {data.updates.schedule}
+                <br />
+                最近完成的收盘日：
+                {data.updates.last_completed_session || "等待首次更新"}
+              </p>
+              <p className="section-note">
+                Mac登录后后台检查，无需打开网页。关机或休眠期间无法联网，恢复后补齐。
+                成功后同一收盘日不重复抓取；接口失败不会自动更换来源或覆盖历史。
+              </p>
+              {data.updates.next_check_at && (
+                <p>
+                  下次检查：
+                  {new Date(data.updates.next_check_at).toLocaleString(
+                    "zh-CN",
+                    {
+                      timeZone: "Asia/Shanghai",
+                      hour12: false,
+                    },
+                  )}
+                  （北京时间，实际取决于本机后台服务运行）
+                </p>
+              )}
+              {data.updates.calendar_error && (
+                <p className="error">{data.updates.calendar_error}</p>
+              )}
+              <button
+                className="secondary"
+                disabled={busy}
+                onClick={() =>
+                  act(async () => {
+                    const r = await post<any>(
+                      `/market-updates/${stock!.id}/check`,
+                      {},
+                    );
+                    const result = r.results[0];
+                    setMessage(
+                      result
+                        ? `收盘检查：${result.status === "succeeded" ? "已完成" : "待处理"}，新增${result.written || 0}条。${result.error || ""}`
+                        : "最近已收盘交易日已完成更新，无需重复抓取。",
+                    );
+                  })
+                }
+              >
+                {busy ? "检查中…" : "检查并补齐收盘数据"}
+              </button>
+              {data.updates.runs.slice(0, 5).map((run: any) => (
+                <details key={run.id}>
+                  <summary>
+                    {run.session_date} ·{" "}
+                    {updateLabels[run.status] || run.status}
+                    {` · 新增${run.written}条`}
+                  </summary>
+                  <p className="section-note">
+                    {run.error || `数据截至${run.data_cutoff}`}
+                  </p>
+                  <pre>{JSON.stringify(run.result, null, 2)}</pre>
+                </details>
+              ))}
+            </>
+          ) : (
+            <p className="section-note">{data.updates.message}</p>
+          )}
           <h3>{stock?.name} · 当前运行数据</h3>
           <p className="note-box">
             日线 {data.bars} 条：{data.data_start} — {data.data_cutoff}

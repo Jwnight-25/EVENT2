@@ -12,7 +12,7 @@ def storage_lock(exclusive=False):
         try:
             fcntl.flock(handle, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise DomainError("数据备份或计算正在使用存储，请稍后重试", "storage_busy", 409)
+            raise DomainError("数据更新、备份或计算正在使用存储，请稍后重试", "storage_busy", 409)
         try:
             yield
         finally:

@@ -10,12 +10,26 @@ def migrate():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["migrate", "backup", "verify-backup", "restore-new"])
+    parser.add_argument(
+        "action", choices=["migrate", "backup", "verify-backup", "restore-new", "update-market"]
+    )
     parser.add_argument("--destination")
     parser.add_argument("--source")
+    parser.add_argument("--stock-id")
+    parser.add_argument("--retry", action="store_true", help="retry a pending daily close check immediately")
     args = parser.parse_args()
     if args.action == "migrate":
         migrate()
+    elif args.action == "update-market":
+        import json
+        from .market_updates import update_due
+        from .errors import DomainError
+
+        try:
+            print(json.dumps(update_due(args.stock_id, force=args.retry), ensure_ascii=False))
+        except DomainError as exc:
+            print(json.dumps({"code": exc.code, "message": exc.message}, ensure_ascii=False))
+            raise SystemExit(0 if exc.code in ("storage_busy", "update_busy") else 1)
     else:
         from .backup import backup, verify, restore_new
 
