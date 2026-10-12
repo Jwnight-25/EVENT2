@@ -391,3 +391,24 @@ def test_news_scheduler_is_independent_of_missing_market_calendar(client, monkey
     assert result["market"]["code"] == "calendar_unavailable"
     assert result["daily"]["code"] == "calendar_unavailable"
     assert len(result["intelligence_jobs"]) == 1
+
+
+def test_repeated_scheduler_handles_two_existing_news_jobs(client, monkeypatch):
+    from backend.app import market_cycle as cycle, market_updates
+
+    identifier, _ = prepared(client, monkeypatch)
+    second = client.post(
+        "/api/v1/stocks", json={"code": "600036", "name": "other test stock", "exchange": "SSE"}
+    )
+    assert second.status_code == 201
+    clock = stamp("2027-01-04")
+    monkeypatch.setattr(cycle, "market_time", lambda: clock)
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    original = market_updates.market_time
+    monkeypatch.setattr(market_updates, "market_time", lambda at=None: original(at or clock))
+    first = cycle.market_cycle()
+    repeated = cycle.market_cycle()
+    assert len(first["intelligence_jobs"]) == 2
+    assert first["intelligence_jobs"] == repeated["intelligence_jobs"]
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Job).where(Job.kind == "intelligence")) == 2

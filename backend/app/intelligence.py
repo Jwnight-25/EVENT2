@@ -199,11 +199,13 @@ def enqueue_intelligence(db, stock_id, key=None):
     if key:
         prior = db.scalar(select(Job).where(Job.idempotency_key == key))
         if prior:
+            db.commit()
             return prior
     for job in db.scalars(
         select(Job).where(Job.kind == "intelligence", Job.status.in_(["queued", "running"]))
     ):
         if job.payload.get("stock_id") == stock_id:
+            db.commit()
             return job
     job = Job(
         kind="intelligence", payload={"stock_id": stock_id}, idempotency_key=key or "intel-manual:" + uid()
