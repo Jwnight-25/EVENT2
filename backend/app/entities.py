@@ -193,3 +193,62 @@ class MarketUpdateRun(Record, Base):
     finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     result: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class DailyBatch(Record, Base):
+    __tablename__ = "daily_batches"
+    stock_id: Mapped[str] = mapped_column(ForeignKey("stocks.id"), index=True)
+    session_date: Mapped[str] = mapped_column(String(10))
+    snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("snapshots.id"), nullable=True)
+    deadline: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="waiting_data")
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    __table_args__ = (UniqueConstraint("stock_id", "session_date"),)
+
+
+class DailyTask(Record, Base):
+    __tablename__ = "daily_tasks"
+    batch_id: Mapped[str] = mapped_column(ForeignKey("daily_batches.id"), index=True)
+    family: Mapped[str] = mapped_column(String(20))
+    training_job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), unique=True)
+    model_id: Mapped[str | None] = mapped_column(ForeignKey("models.id"), nullable=True)
+    prediction_id: Mapped[str | None] = mapped_column(
+        ForeignKey("predictions.id"), nullable=True, unique=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="training")
+    error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    feedback: Mapped[dict] = mapped_column(JSON, default=dict)
+    __table_args__ = (UniqueConstraint("batch_id", "family"),)
+
+
+class DailyOutcome(Record, Base):
+    __tablename__ = "daily_outcomes"
+    task_id: Mapped[str] = mapped_column(ForeignKey("daily_tasks.id"), index=True)
+    actual_revision_id: Mapped[str] = mapped_column(ForeignKey("bar_revisions.id"))
+    metrics: Mapped[dict] = mapped_column(JSON)
+    __table_args__ = (UniqueConstraint("task_id", "actual_revision_id"),)
+
+
+class IntelligenceItem(Record, Base):
+    __tablename__ = "intelligence_items"
+    stock_id: Mapped[str] = mapped_column(ForeignKey("stocks.id"), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(30))
+    title: Mapped[str] = mapped_column(String(500))
+    url: Mapped[str] = mapped_column(String(2000))
+    publisher: Mapped[str] = mapped_column(String(150))
+    summary: Mapped[str] = mapped_column(String(300))
+    published_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    retrieved_at: Mapped[str] = mapped_column(String(40), default=now)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    __table_args__ = (UniqueConstraint("stock_id", "fingerprint"),)
+
+
+class IntelligenceSync(Record, Base):
+    __tablename__ = "intelligence_syncs"
+    stock_id: Mapped[str] = mapped_column(ForeignKey("stocks.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)

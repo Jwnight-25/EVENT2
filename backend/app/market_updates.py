@@ -213,14 +213,19 @@ def download_daily(provider, stock, start, end, directory):
     }
 
 
-def _attempts(db, stock_id, target):
-    return list(
+def _attempts(db, stock_id, target, at=None):
+    attempts = list(
         db.scalars(
             select(MarketUpdateRun)
             .where(MarketUpdateRun.stock_id == stock_id, MarketUpdateRun.session_date == target)
             .order_by(MarketUpdateRun.started_at.desc(), MarketUpdateRun.id.desc())
         )
     )
+    if at is not None:
+        attempts = [
+            run for run in attempts if market_time(datetime.fromisoformat(run.started_at)).date() == at.date()
+        ]
+    return attempts
 
 
 def _update_one(db, feed, target, stamp):
@@ -347,7 +352,7 @@ def update_due(stock_id=None, force=False, at=None):
         for feed in feeds:
             if not feed.enabled or feed.last_completed_session == target:
                 continue
-            attempts = _attempts(db, feed.stock_id, target)
+            attempts = _attempts(db, feed.stock_id, target, stamp)
             if (
                 not force
                 and attempts
@@ -378,7 +383,7 @@ def update_status(db, stock_id, at=None):
     calendar_error, next_check, target = None, None, None
     try:
         target = latest_closed_session(db, stamp)
-        attempts = _attempts(db, stock_id, target)
+        attempts = _attempts(db, stock_id, target, stamp)
         if feed.last_completed_session == target or len(attempts) >= MAX_ATTEMPTS:
             next_check = datetime.combine(
                 datetime.fromisoformat(future_dates(db, target, 1)[0]).date(), CLOSE_CHECK, SHANGHAI
@@ -395,7 +400,7 @@ def update_status(db, stock_id, at=None):
         "provider": feed.provider,
         "provider_label": PROVIDERS[feed.provider],
         "price_basis": feed.price_basis,
-        "schedule": "交易日15:30（北京时间）；后台每5分钟检查，失败间隔15分钟、每交易日最多6次",
+        "schedule": "交易日15:30（北京时间）；后台每5分钟检查，失败间隔15分钟；同股同目标日每天自动最多6次",
         "last_completed_session": feed.last_completed_session,
         "target_session": target,
         "next_check_at": next_check.isoformat() if next_check else None,

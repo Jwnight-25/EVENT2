@@ -28,7 +28,7 @@ def main():
     logs = data_dir / "logs"
     config = {
         "Label": LABEL,
-        "ProgramArguments": [str(executable), "-m", "backend.app.manage", "update-market"],
+        "ProgramArguments": [str(executable), "-m", "backend.app.manage", "market-cycle"],
         "WorkingDirectory": str(project),
         "EnvironmentVariables": {
             "DATA_DIR": str(data_dir),
@@ -46,28 +46,40 @@ def main():
         print(plistlib.dumps(config).decode())
         return
     if sys.platform != "darwin":
-        parser.error("此安装器仅支持macOS；其他系统可每5分钟运行manage update-market")
+        parser.error("此安装器仅支持macOS；其他系统可每5分钟运行manage market-cycle并常驻worker")
     subprocess.run([str(executable), "-c", "import httpx, sqlalchemy, exchange_calendars"], check=True)
     logs.mkdir(parents=True, exist_ok=True)
     agent_dir = Path.home() / "Library/LaunchAgents"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    target = agent_dir / f"{LABEL}.plist"
     domain = f"gui/{os.getuid()}"
-    if target.exists():
-        existing = plistlib.loads(target.read_bytes())
-        if existing.get("Label") != LABEL:
-            raise SystemExit("已有配置标识不符，已保留原文件")
-        subprocess.run(["launchctl", "bootout", domain, str(target)], capture_output=True)
-    temporary = target.with_suffix(".plist.tmp")
-    temporary.write_bytes(plistlib.dumps(config))
-    temporary.chmod(0o644)
-    temporary.replace(target)
-    subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True)
-    subprocess.run(["launchctl", "print", f"{domain}/{LABEL}"], check=True, capture_output=True)
+    worker = {
+        **config,
+        "Label": "com.event2.worker",
+        "ProgramArguments": [str(executable), "-m", "backend.app.worker"],
+        "KeepAlive": True,
+        "ThrottleInterval": 30,
+        "StandardOutPath": str(logs / "worker-background.log"),
+        "StandardErrorPath": str(logs / "worker-background-error.log"),
+    }
+    worker.pop("StartInterval")
+    for item in (config, worker):
+        label = item["Label"]
+        target = agent_dir / f"{label}.plist"
+        if target.exists():
+            existing = plistlib.loads(target.read_bytes())
+            if existing.get("Label") != label:
+                raise SystemExit("已有配置标识不符，已保留原文件")
+            subprocess.run(["launchctl", "bootout", domain, str(target)], capture_output=True)
+        temporary = target.with_suffix(".plist.tmp")
+        temporary.write_bytes(plistlib.dumps(item))
+        temporary.chmod(0o644)
+        temporary.replace(target)
+        subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True)
+        subprocess.run(["launchctl", "print", f"{domain}/{label}"], check=True, capture_output=True)
     print(
         json.dumps(
             {
-                "installed": str(target),
+                "installed": [str(agent_dir / f"{label}.plist") for label in (LABEL, "com.event2.worker")],
                 "check_interval_seconds": 300,
                 "market_close_check": "15:30 Asia/Shanghai",
                 "python": str(executable),

@@ -651,28 +651,33 @@ export function Training({
                       </td>
                       <td>
                         <span className={"pill" + (m.selected ? "" : " gray")}>
-                          {m.selected
-                            ? m.metrics.evaluation_mode === "cross_validation"
-                              ? "交叉验证通过 · 已入选"
-                              : "已入选"
-                            : m.family === "naive"
-                              ? "比较基准"
-                              : m.metrics.evaluation_mode === "research"
-                                ? m.metrics.passes_thresholds
-                                  ? "研究达标 · 待独立验收"
-                                  : "研究未达标"
-                                : m.metrics.evaluation_mode ===
-                                    "cross_validation"
+                          {m.metrics.automatic_candidate
+                            ? m.family === "naive"
+                              ? "盘前比较基准"
+                              : "盘前自动候选"
+                            : m.selected
+                              ? m.metrics.evaluation_mode === "cross_validation"
+                                ? "交叉验证通过 · 已入选"
+                                : "已入选"
+                              : m.family === "naive"
+                                ? "比较基准"
+                                : m.metrics.evaluation_mode === "research"
                                   ? m.metrics.passes_thresholds
-                                    ? "交叉验证通过 · 非当前入选"
-                                    : "交叉验证未达标"
-                                  : "未入选"}
+                                    ? "研究达标 · 待独立验收"
+                                    : "研究未达标"
+                                  : m.metrics.evaluation_mode ===
+                                      "cross_validation"
+                                    ? m.metrics.passes_thresholds
+                                      ? "交叉验证通过 · 非当前入选"
+                                      : "交叉验证未达标"
+                                    : "未入选"}
                         </span>
                         <small
                           className="muted"
                           style={{ display: "block", maxWidth: 240 }}
                         >
-                          {m.metrics.evaluation_mode === "cross_validation" &&
+                          {!m.metrics.automatic_candidate &&
+                          m.metrics.evaluation_mode === "cross_validation" &&
                           m.metrics.passes_thresholds &&
                           !m.selected
                             ? "此版本匹配度达标；预测默认使用当前入选版本。"

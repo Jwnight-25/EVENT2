@@ -11,15 +11,26 @@ def migrate():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "action", choices=["migrate", "backup", "verify-backup", "restore-new", "update-market"]
+        "action",
+        choices=["migrate", "backup", "verify-backup", "restore-new", "update-market", "market-cycle"],
     )
     parser.add_argument("--destination")
     parser.add_argument("--source")
     parser.add_argument("--stock-id")
+    parser.add_argument(
+        "--prepare-next",
+        action="store_true",
+        help="prepare a prospective next-session batch before its deadline",
+    )
     parser.add_argument("--retry", action="store_true", help="retry a pending daily close check immediately")
     args = parser.parse_args()
     if args.action == "migrate":
         migrate()
+    elif args.action == "market-cycle":
+        import json
+        from .market_cycle import market_cycle
+
+        print(json.dumps(market_cycle(bootstrap=args.prepare_next), ensure_ascii=False))
     elif args.action == "update-market":
         import json
         from .market_updates import update_due

@@ -235,3 +235,19 @@ def test_future_session_and_interrupted_run_are_safe(client, monkeypatch):
         updates.update_due(identifier, force=True, at=moment("2024-01-04"))["results"][0]["status"]
         == "succeeded"
     )
+
+
+def test_source_retry_budget_recovers_next_morning_without_changing_source(client, monkeypatch):
+    identifier = setup_stock(client, "Eastmoney")
+
+    def failed(*_):
+        raise RuntimeError("temporary connection failure")
+
+    monkeypatch.setattr(updates, "download_daily", failed)
+    for attempt in range(6):
+        updates.update_due(identifier, at=moment("2024-01-04") + timedelta(minutes=15 * attempt))
+    calls = fake_download(monkeypatch)
+    result = updates.update_due(identifier, at=moment("2024-01-05", 8))
+    assert result["session_date"] == "2024-01-04"
+    assert result["results"][0]["status"] == "succeeded"
+    assert calls[0][0] == "Eastmoney"

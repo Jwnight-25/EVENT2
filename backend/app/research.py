@@ -1,6 +1,7 @@
 """Causal multi-horizon experiments. No random split, no fabricated predictions."""
 
 import hashlib
+import json
 import time
 import warnings
 
@@ -181,7 +182,9 @@ def candidates(family, config=None):
         "nhits": [{"input_size": size, "max_steps": count} for size in (60, 120) for count in (100, 200)],
         "patchtst": [{"input_size": size, "max_steps": count} for size in (60, 120) for count in (100, 200)],
     }
-    return grid[family]
+    seed = config.get("seed_parameters", {}).get(family)
+    choices = ([seed] if isinstance(seed, dict) else []) + grid[family]
+    return list({json.dumps(item, sort_keys=True): item for item in choices}.values())
 
 
 def fit(rows, features, end, horizon, family, parameters, seed):
@@ -872,6 +875,11 @@ def train_job(job_id):
                     if model.metrics["passes_thresholds"]
                     else "未通过：15%交叉验证价格匹配度低于设定门槛"
                 )
+        if config.get("daily_target_session"):
+            for model in local_models:
+                model.selected = False
+                model.metrics = {**model.metrics, "automatic_candidate": True}
+                model.reason = "盘前自动候选；保存预测及真实复盘，不替换手动入选模型；匹配度单独报告"
         evidence = assess_models(local_models, rows, steps)
         for model in local_models:
             model.metrics = {**model.metrics, "assessment": evidence[model.id]}
@@ -901,7 +909,11 @@ def train_job(job_id):
     checkpoint(job_id, "保存实验、模型与验收结果", 95)
     report["elapsed_seconds"] = round(time.monotonic() - started, 2)
     with SessionLocal() as db:
-        for horizon in completed_horizons if mode in ("holdout", "cross_validation") else []:
+        for horizon in (
+            completed_horizons
+            if mode in ("holdout", "cross_validation") and not config.get("daily_target_session")
+            else []
+        ):
             for old in db.scalars(
                 select(Model).where(
                     Model.stock_id == stock_id,
@@ -930,7 +942,7 @@ def prediction_job(job_id):
         identifier, horizon, cutoff = prediction.id, prediction.horizon, snapshot.cutoff
     result_models = []
     model_failures = []
-    prediction_deadline = time.monotonic() + 540
+    prediction_deadline = time.monotonic() + min(540, config.get("prediction_budget_seconds", 540))
     reference = config.get("reference_price") or rows[-1]["close"]
     for model in models:
         try:
@@ -1063,6 +1075,9 @@ def prediction_job(job_id):
     checkpoint(job_id, "保存预测结果", 95)
     with SessionLocal() as db:
         prediction = db.get(Prediction, identifier)
+        from .daily_research import finalize_daily_result
+
+        result = finalize_daily_result(db, prediction, result)
         prediction.result = result
         db.commit()
     if config["with_ai"]:

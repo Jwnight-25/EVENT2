@@ -10,12 +10,14 @@ import {
   Plus,
   CircleHelp,
   ChevronDown,
+  Newspaper,
 } from "lucide-react";
 import { api, type Stock } from "./api";
 import { useLoad } from "./components";
 import { Market, AddStock } from "./Market";
 import { Training } from "./Training";
 import { Forecast } from "./Forecast";
+import { Intelligence } from "./Intelligence";
 import { Maintenance } from "./Maintenance";
 import { CalendarUpload } from "./CalendarUpload";
 
@@ -75,6 +77,7 @@ export default function App() {
             ["market", "行情研究", ChartCandlestick],
             ["training", "模型训练", BrainCircuit],
             ["prediction", "预测分析", ChartLine],
+            ["intelligence", "信息情报", Newspaper],
           ].map(([id, label, Icon]) => {
             const Glyph = Icon as typeof Activity;
             return (
@@ -119,7 +122,7 @@ export default function App() {
             <div className="sidebar-mode">
               <Monitor size={14} aria-hidden="true" /> 本机研究模式
             </div>
-            <p>手动导入 · 按需分析</p>
+            <p>盘前训练 · 收盘复盘</p>
           </div>
           <div className="sidebar-bottom">
             <CircleHelp size={14} aria-hidden="true" />
@@ -194,6 +197,8 @@ export default function App() {
               version={version}
               refresh={refresh}
             />
+          ) : page === "intelligence" ? (
+            <Intelligence key={stock?.id} stock={stock} />
           ) : (
             <Forecast
               key={stock?.id + basis}

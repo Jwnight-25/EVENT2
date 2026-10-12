@@ -304,8 +304,7 @@ export function Market({
   version: number;
   addStock: () => void;
 }) {
-  const [interval, setInterval] = useState("1d");
-  const [mode, setMode] = useState("k");
+  const interval = "1d";
   const [upload, setUpload] = useState(false);
   const [window, setWindow] = useState<WindowRange | null>(null);
   const [dateStart, setDateStart] = useState("");
@@ -450,27 +449,18 @@ export function Market({
         },
       ],
       series: [
-        mode === "k"
-          ? {
-              name: "行情",
-              id: "market-price-series",
-              type: "candlestick" as const,
-              data: rows.map((r) => [r.open, r.close, r.low, r.high]),
-              itemStyle: {
-                color: RISE,
-                color0: FALL,
-                borderColor: RISE,
-                borderColor0: FALL,
-              },
-            }
-          : {
-              name: "收盘价",
-              id: "market-price-series",
-              type: "line" as const,
-              data: rows.map((r) => r.close),
-              symbol: "none",
-              lineStyle: { color: "#28765e", width: 2 },
-            },
+        {
+          name: "日K线",
+          id: "market-price-series",
+          type: "candlestick" as const,
+          data: rows.map((r) => [r.open, r.close, r.low, r.high]),
+          itemStyle: {
+            color: RISE,
+            color0: FALL,
+            borderColor: RISE,
+            borderColor0: FALL,
+          },
+        },
         {
           name: "成交量（股）",
           id: "market-volume-series",
@@ -484,7 +474,7 @@ export function Market({
         },
       ],
     }),
-    [data, mode, range.start, range.end, prices.min, prices.max],
+    [data, range.start, range.end, prices.min, prices.max],
   );
   return (
     <>
@@ -524,7 +514,7 @@ export function Market({
           <strong className="date-value">
             {last?.time.slice(0, 16) || "暂无数据"}
           </strong>
-          <span>历史上传数据 · 非实时行情</span>
+          <span>收盘日线 · 非实时行情</span>
         </div>
         <div className="metric">
           <small>可见记录</small>
@@ -550,43 +540,7 @@ export function Market({
               · {data?.aggregation || "保留原始价格口径"}
             </p>
           </div>
-          <div className="segmented">
-            <button
-              className={mode === "k" ? "active" : ""}
-              onClick={() => setMode("k")}
-            >
-              K线
-            </button>
-            <button
-              className={mode === "line" ? "active" : ""}
-              onClick={() => setMode("line")}
-            >
-              走势
-            </button>
-          </div>
-        </div>
-        <div className="periods">
-          {[
-            ["1m", "1分"],
-            ["5m", "5分"],
-            ["30m", "半小时"],
-            ["1h", "1小时"],
-            ["1d", "日"],
-            ["1mo", "月"],
-          ].map(([value, label]) => (
-            <button
-              className={interval === value ? "active" : ""}
-              key={value}
-              onClick={() => {
-                setInterval(value);
-                setWindow(null);
-                resetPrice();
-              }}
-            >
-              {label}
-            </button>
-          ))}
-          <span>K线红阳 · 绿阴</span>
+          <span className="pill">日K线 · 红阳绿阴</span>
         </div>
         {rows.length > 0 && (
           <>

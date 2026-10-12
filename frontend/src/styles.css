@@ -1238,3 +1238,93 @@ pre {
     bottom: -18px;
   }
 }
+
+.intel-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line, #e2e8dc);
+}
+.intel-filters button.active {
+  background: #315b46;
+  color: white;
+  border-color: #315b46;
+}
+.intelligence-scroll {
+  max-height: 68vh;
+  min-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 12px;
+  scrollbar-color: #9cb3a1 #f3f5ef;
+  scrollbar-width: thin;
+}
+.intelligence-item {
+  padding: 22px 2px;
+  border-bottom: 1px solid #e5eadf;
+}
+.intelligence-item h3 {
+  margin: 12px 0 10px;
+  font-size: 17px;
+  line-height: 1.7;
+}
+.intelligence-item h3 a {
+  color: #274d3b;
+  text-decoration: none;
+}
+.intelligence-item h3 a:hover {
+  text-decoration: underline;
+}
+.intelligence-item h3 svg {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.intelligence-item > p {
+  font-size: 13px;
+  line-height: 1.9;
+}
+.intel-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  color: #7c8979;
+  font-size: 11px;
+}
+.intel-load-more {
+  width: 100%;
+  margin: 18px 0;
+}
+.daily-model-detail {
+  border-top: 1px solid #e3e9dc;
+  padding: 14px 0;
+}
+.daily-model-detail summary {
+  cursor: pointer;
+  color: #48634d;
+  font-size: 13px;
+}
+.daily-forecast table small {
+  white-space: nowrap;
+}
+.manual-research {
+  margin: 20px 0;
+}
+.manual-research > summary {
+  cursor: pointer;
+  padding: 18px 22px;
+  border: 1px solid #dce4d5;
+  border-radius: 12px;
+  background: #f5f7ef;
+  color: #4d6651;
+  margin-bottom: 18px;
+}
+@media (max-width: 700px) {
+  .intelligence-scroll {
+    max-height: 62vh;
+  }
+  .intel-meta {
+    gap: 6px;
+  }
+}

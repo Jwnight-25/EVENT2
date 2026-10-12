@@ -37,8 +37,12 @@ cleanup() { for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 >data/logs/api.log 2>&1 &
 pids+=("$!")
-.venv/bin/python -m backend.app.worker >data/logs/worker.log 2>&1 &
-pids+=("$!")
+if ! command -v launchctl >/dev/null 2>&1 || ! launchctl print "gui/$(id -u)/com.event2.worker" >/dev/null 2>&1; then
+  .venv/bin/python -m backend.app.worker >data/logs/worker.log 2>&1 &
+  pids+=("$!")
+else
+  echo '自动训练工作进程已由本机后台服务管理。'
+fi
 (cd frontend && "$package_manager" dev --strictPort) >data/logs/frontend.log 2>&1 &
 pids+=("$!")
 sleep 2

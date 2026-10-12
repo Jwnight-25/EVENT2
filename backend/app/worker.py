@@ -10,7 +10,7 @@ import time
 for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(name, "1")
 
-from sqlalchemy import select
+from sqlalchemy import select, case
 from .config import DATA_DIR
 from .db import SessionLocal, now, engine
 from .entities import Job
@@ -49,6 +49,10 @@ def _execute_job(job_id):
             from .advice import advice_job
 
             advice_job(job_id)
+        elif kind == "intelligence":
+            from .intelligence import intelligence_job
+
+            intelligence_job(job_id)
         else:
             raise ValueError("未知任务类型")
         with SessionLocal() as db:
@@ -67,6 +71,11 @@ def _execute_job(job_id):
             else f"{type(exc).__name__}: {str(exc)[:800]}"
         )
         finish(job_id, "failed", error)
+    finally:
+        if kind in ("training", "prediction"):
+            from .daily_research import reconcile_job
+
+            reconcile_job(job_id)
 
 
 def execute_job(job_id):
@@ -87,7 +96,12 @@ def claim_job():
 
 def _claim_job():
     with SessionLocal() as db:
-        query = select(Job).where(Job.status == "queued").order_by(Job.created_at).limit(1)
+        query = (
+            select(Job)
+            .where(Job.status == "queued")
+            .order_by(case((Job.idempotency_key.like("daily-%"), 0), else_=1), Job.created_at)
+            .limit(1)
+        )
         if engine.dialect.name == "postgresql":
             query = query.with_for_update(skip_locked=True)
         job = db.scalar(query)
@@ -141,6 +155,19 @@ def main(once=False):
         budget = (
             payload.get("request", {}).get("time_budget_seconds", 300) + 90 if kind == "training" else 600
         )
+        daily_deadline = payload.get("request", {}).get("daily_deadline")
+        if daily_deadline:
+            from datetime import datetime, timezone
+            from .daily_research import reconcile_job
+
+            remaining = (datetime.fromisoformat(daily_deadline) - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0:
+                finish(identifier, "failed", "已过09:15盘前截止，不补造预测")
+                reconcile_job(identifier)
+                if once:
+                    break
+                continue
+            budget = min(budget, remaining)
         process = context.Process(target=execute_job, args=(identifier,))
         process.start()
         deadline = time.monotonic() + budget
@@ -153,10 +180,18 @@ def main(once=False):
                 process.kill()
                 process.join()
             finish(identifier, "failed", "工作进程停止或超过任务总预算")
+            if daily_deadline:
+                from .daily_research import reconcile_job
+
+                reconcile_job(identifier)
         else:
             with SessionLocal() as db:
                 if db.get(Job, identifier).status == "running":
                     finish(identifier, "failed", f"计算进程异常退出：{process.exitcode}")
+        if daily_deadline:
+            from .daily_research import reconcile_job
+
+            reconcile_job(identifier)
         if once:
             break
     if pg_lock:

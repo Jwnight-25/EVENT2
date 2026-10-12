@@ -55,7 +55,7 @@ async def lifespan(_):
     engine.dispose()
 
 
-app = FastAPI(title="EVENT2 · 股票研究", version="0.10.0", lifespan=lifespan)
+app = FastAPI(title="EVENT2 · 股票研究", version="0.11.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -683,6 +683,34 @@ def market_update_status(stock_id: str, db: DB):
     from .market_updates import update_status
 
     return update_status(db, stock_id)
+
+
+@app.get(API_PREFIX + "/daily-research/{stock_id}")
+def daily_research_status(stock_id: str, db: DB):
+    from .daily_research import daily_status
+
+    return daily_status(db, stock_id)
+
+
+@app.get(API_PREFIX + "/intelligence/{stock_id}")
+def intelligence_list(
+    stock_id: str,
+    db: DB,
+    kind: Literal["news", "stock_report", "industry_report"] | None = None,
+    before: str | None = None,
+    limit: int = Query(30, ge=1, le=100),
+):
+    from .intelligence import intelligence_status
+
+    return intelligence_status(db, stock_id, kind, before, limit)
+
+
+@app.post(API_PREFIX + "/intelligence/{stock_id}/refresh", status_code=202)
+def intelligence_refresh(stock_id: str, db: DB):
+    from .intelligence import enqueue_intelligence
+
+    job = enqueue_intelligence(db, stock_id)
+    return {"job_id": job.id}
 
 
 @app.post(API_PREFIX + "/market-updates/{stock_id}/check")
