@@ -18,6 +18,7 @@ const fields = [
   ["low", "最低"],
   ["close", "收盘"],
 ];
+const points = (value: number) => (value > 0 ? `+${value}` : `${value}`);
 export function DailyForecast({
   stock,
   basis,
@@ -118,6 +119,51 @@ export function DailyForecast({
             　数据截至 {batch.config.data_cutoff || "等待补齐"}　
             {batch.error || ""}
           </p>
+          <h3>模型积分榜</h3>
+          <p className="section-note">
+            开高低收统一四舍五入到分，按四项平均绝对误差排名。最接近+2，四项全对+5（不叠加），最差−2，其余0。并列同分；全部误差相同且非全对时均0分。包括naive比较基准。
+          </p>
+          <div className="table-wrap">
+            <table aria-label="模型奖罚积分">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th>本日积分</th>
+                  <th>排名MAE / 元</th>
+                  <th>累计积分</th>
+                  <th>已评分交易日</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(batch.tasks || []).map((t: any) => {
+                  const total = data.leaderboard?.find(
+                    (v: any) => v.family === t.family,
+                  );
+                  return (
+                    <tr key={t.id}>
+                      <td>
+                        <strong>{t.family}</strong>
+                      </td>
+                      <td>
+                        {t.score ? (
+                          <strong>{points(t.score.points)}</strong>
+                        ) : (
+                          "待评分"
+                        )}
+                      </td>
+                      <td>{t.score ? t.score.ranking_mae.toFixed(4) : "—"}</td>
+                      <td>{total ? points(total.points) : "—"}</td>
+                      <td>{total?.sessions ?? 0}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="section-note">
+            累计截至 {data.points_through || "尚无已评分日期"}
+            ，按同股模型类型跨版本汇总，行情修订只计最新一轮，不重复加分。
+          </p>
           {available.length > 0 && <Chart option={chart} height={280} />}
           <div className="table-wrap">
             <table>
@@ -130,8 +176,8 @@ export function DailyForecast({
                   <th>收盘区间</th>
                   <th>历史验证匹配</th>
                   <th>真实收盘</th>
-                  <th>OHLC MAE</th>
-                  <th>奖励</th>
+                  <th>原值OHLC MAE</th>
+                  <th>本日积分</th>
                 </tr>
               </thead>
               <tbody>
@@ -160,8 +206,8 @@ export function DailyForecast({
                           ? money(t.outcome.actual.close)
                           : "待收盘核对"}
                       </td>
-                      <td>{t.outcome ? money(t.outcome.mae) : "—"}</td>
-                      <td>{t.outcome ? t.outcome.reward.toFixed(3) : "—"}</td>
+                      <td>{t.outcome ? t.outcome.mae.toFixed(4) : "—"}</td>
+                      <td>{t.score ? points(t.score.points) : "—"}</td>
                     </tr>
                   );
                 })}
@@ -242,6 +288,12 @@ export function DailyForecast({
                   {money(t.outcome.raw_mae)}
                 </p>
               )}
+              {t.score && (
+                <p>
+                  本日{points(t.score.points)}分 · {t.score.reason} · 排名
+                  {t.score.rank} · 分精度MAE {t.score.ranking_mae.toFixed(4)}元
+                </p>
+              )}
               <p className="section-note">
                 {t.feedback.note}。本轮每类参数试验{" "}
                 {t.feedback.search_trials || 4} 次。
@@ -257,7 +309,7 @@ export function DailyForecast({
         </>
       )}
       <p className="section-note">
-        每个可用模型类型保留当日新版本；沿用收盘价模型是比较基准。奖励以相对基准的真实误差计算，范围−1到1。至少5个真实盘前样本才启用有限偏差校正；没有事后补算的盘前成绩。单日覆盖率仅有4个目标，不能表示长期可信度。
+        每个可用模型类型保留当日新版本；沿用收盘价模型是比较基准。奖罚按真实四价误差排名，积分不代表交易收益。至少5个真实盘前样本才启用有限偏差校正；至少5个积分样本才按平均积分调整搜索预算。单日覆盖率仅有4个目标，不能表示长期可信度。
       </p>
     </section>
   );

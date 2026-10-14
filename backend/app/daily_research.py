@@ -49,6 +49,8 @@ def target_session(db, stamp, bootstrap=False):
 
 
 def feedback_for(db, stock_id, family, target, stamp, reference):
+    from .daily_points import latest_rounds, POLICY as POINT_POLICY
+
     rows = db.execute(
         select(DailyOutcome, DailyTask, DailyBatch)
         .join(DailyTask, DailyOutcome.task_id == DailyTask.id)
@@ -76,6 +78,13 @@ def feedback_for(db, stock_id, family, target, stamp, reference):
     }
     rewards = [o.metrics["reward"] for o, _ in sample]
     mean_reward = sum(rewards) / len(rewards) if rewards else None
+    point_entries = [
+        entry
+        for round_, _ in latest_rounds(db, stock_id, as_of=stamp, before_session=target)
+        for entry in round_.result["entries"]
+        if entry["family"] == family
+    ][:20]
+    mean_points = sum(e["points"] for e in point_entries) / len(point_entries) if point_entries else None
     return {
         "policy": POLICY,
         "sample_count": len(sample),
@@ -84,10 +93,14 @@ def feedback_for(db, stock_id, family, target, stamp, reference):
         "mean_raw_bias": bias,
         "adjustments": adjustment,
         "mean_reward": mean_reward,
+        "points_policy": POINT_POLICY,
+        "point_sample_count": len(point_entries),
+        "mean_points": mean_points,
+        "recent_points": sum(e["points"] for e in point_entries),
         "outcome_ids": [o.id for o, _ in sample],
         "latest_feedback_session": max((b.session_date for _, b in sample), default=None),
         "frozen_at": stamp.astimezone(SHANGHAI).isoformat(),
-        "search_trials": 6 if len(sample) >= 5 and mean_reward < 0 else 4,
+        "search_trials": 6 if len(point_entries) >= 5 and mean_points < 0 else 4,
         "note": "只使用已收盘且当时已入库的前序日期；至少5个真实盘前样本才校正，幅度为均值偏差的25%，上限参考价0.5%",
     }
 
@@ -120,9 +133,9 @@ def training_config(db, stock_id, family, target, stamp, snapshot):
     ).model_dump()
     if previous:
         config["seed_parameters"] = {family: previous.parameters}
-        if family == "ridge" and feedback["sample_count"] >= 5:
+        if family == "ridge" and feedback["point_sample_count"] >= 5:
             alpha = previous.parameters["alpha"]
-            factor = 100 if feedback["mean_reward"] < 0 else 10
+            factor = 100 if feedback["mean_points"] < 0 else 10
             config["ridge_alpha_min"] = max(0.01, alpha / factor)
             config["ridge_alpha_max"] = min(100000, alpha * factor)
     config["daily_target_session"] = target
@@ -426,6 +439,8 @@ def settle_daily(db, stamp):
 
 
 def daily_tick(at=None, bootstrap=False):
+    from .daily_points import award_points
+
     stamp = market_time(at)
     with update_lock(), storage_lock(exclusive=True), SessionLocal() as db:
         target = target_session(db, stamp, bootstrap)
@@ -456,6 +471,9 @@ def daily_tick(at=None, bootstrap=False):
                 batch.status = "partial"
                 batch.error = "部分模型按时保存，其他模型错过盘前截止"
         db.commit()
+        # Catch-up actuals must be scored before freezing the next training configuration.
+        scored = settle_daily(db, stamp)
+        point_rounds = award_points(db, stamp)
         targets = {(s.id, target) for s in db.scalars(select(Stock))} if target else set()
         for batch in db.scalars(select(DailyBatch).where(DailyBatch.status == "waiting_data")):
             if batch.config.get("bootstrap") and stamp < datetime.fromisoformat(batch.deadline):
@@ -467,7 +485,6 @@ def daily_tick(at=None, bootstrap=False):
                 {"stock_id": stock_id, "session_date": day, "status": batch.status, "error": batch.error}
             )
         db.commit()
-        scored = settle_daily(db, stamp)
     # Outside the exclusive lock: reconciliation itself may be invoked in the worker.
     with storage_lock(), SessionLocal() as db:
         identifiers = list(
@@ -482,11 +499,20 @@ def daily_tick(at=None, bootstrap=False):
         )
         for job_id in identifiers + predictions:
             reconcile_job(job_id)
-    return {"batches": result, "scored": scored, "checked_at": stamp.isoformat()}
+    return {
+        "batches": result,
+        "scored": scored,
+        "point_rounds": point_rounds,
+        "checked_at": stamp.isoformat(),
+    }
 
 
 def daily_status(db, stock_id):
+    from .daily_points import latest_rounds, leaderboard, RULE
+
     require(db.get(Stock, stock_id), "股票不存在")
+    rounds = latest_rounds(db, stock_id)
+    point_rounds = {batch.id: round_ for round_, batch in rounds}
     batches = list(
         db.scalars(
             select(DailyBatch)
@@ -497,6 +523,8 @@ def daily_status(db, stock_id):
     )
     result = []
     for batch in batches:
+        point_round = point_rounds.get(batch.id)
+        entries = {e["task_id"]: e for e in point_round.result["entries"]} if point_round else {}
         tasks = []
         for task in db.scalars(
             select(DailyTask).where(DailyTask.batch_id == batch.id).order_by(DailyTask.family)
@@ -520,6 +548,7 @@ def daily_status(db, stock_id):
                     "feedback": task.feedback,
                     "prediction": prediction.result if prediction else None,
                     "outcome": outcome.metrics if outcome else None,
+                    "score": entries.get(task.id),
                 }
             )
         result.append(
@@ -531,11 +560,15 @@ def daily_status(db, stock_id):
                 "deadline": batch.deadline,
                 "config": batch.config,
                 "tasks": tasks,
+                "points_awarded_at": point_round.created_at if point_round else None,
             }
         )
     return {
         "stock_id": stock_id,
         "schedule": "交易日07:00开始；09:15前冻结预测；15:30后核对真实OHLC",
         "policy": POLICY,
+        "scoring_rule": RULE,
+        "leaderboard": leaderboard(rounds),
+        "points_through": rounds[0][1].session_date if rounds else None,
         "batches": result,
     }

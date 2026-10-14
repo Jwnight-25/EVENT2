@@ -55,7 +55,7 @@ async def lifespan(_):
     engine.dispose()
 
 
-app = FastAPI(title="EVENT2 · 股票研究", version="0.11.0", lifespan=lifespan)
+app = FastAPI(title="EVENT2 · 股票研究", version="0.12.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],

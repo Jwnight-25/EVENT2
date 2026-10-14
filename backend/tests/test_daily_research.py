@@ -14,6 +14,7 @@ from backend.app.entities import (
     DailyBatch,
     DailyTask,
     DailyOutcome,
+    DailyPointRound,
     Job,
     TrainingRun,
     Model,
@@ -78,7 +79,7 @@ def make_result(target, cutoff, feedback=None):
     }
 
 
-def freeze_prediction(db, batch, task, clock):
+def freeze_prediction(db, batch, task, clock, candle=None):
     training = db.get(Job, task.training_job_id)
     run = db.get(TrainingRun, training.result["run_id"])
     model = Model(
@@ -104,9 +105,11 @@ def freeze_prediction(db, batch, task, clock):
     task = db.get(DailyTask, task.id)
     prediction = db.get(Prediction, task.prediction_id)
     snapshot = db.get(Snapshot, batch.snapshot_id)
-    prediction.result = daily.finalize_daily_result(
-        db, prediction, make_result(batch.session_date, snapshot.cutoff)
-    )
+    result = make_result(batch.session_date, snapshot.cutoff)
+    result["models"][0]["family"] = task.family
+    if candle:
+        result["models"][0]["candle"] = candle
+    prediction.result = daily.finalize_daily_result(db, prediction, result)
     db.get(Job, prediction.job_id).status = "succeeded"
     db.commit()
     daily.reconcile_job(prediction.job_id)
@@ -280,9 +283,31 @@ def test_feedback_requires_five_distinct_prior_days_and_respects_availability_ti
         db.commit()
         feedback = daily.feedback_for(db, identifier, "ridge", target, clock, 10.0)
         assert feedback["sample_count"] == 5 and feedback["mean_raw_bias"]["close"] == 2
-        assert feedback["adjustments"]["close"] == -0.05 and feedback["search_trials"] == 6
+        assert feedback["adjustments"]["close"] == -0.05
+        assert feedback["point_sample_count"] == 0 and feedback["search_trials"] == 4
+        from backend.app.daily_points import POLICY as POINT_POLICY
+
+        for batch in db.scalars(select(DailyBatch)):
+            task = db.scalar(select(DailyTask).where(DailyTask.batch_id == batch.id))
+            revision = db.get(BarCurrent, (identifier, "1d", "raw", batch.session_date)).revision_id
+            for created, points in [("2024-01-03T09:00:00+00:00", -2), ("2024-01-04T04:00:00+00:00", 5)]:
+                db.add(
+                    DailyPointRound(
+                        batch_id=batch.id,
+                        actual_revision_id=revision,
+                        policy=POINT_POLICY,
+                        cohort_checksum=("a" if points < 0 else "b") * 64,
+                        created_at=created,
+                        result={"entries": [{"task_id": task.id, "family": "ridge", "points": points}]},
+                    )
+                )
+        db.commit()
+        feedback = daily.feedback_for(db, identifier, "ridge", target, clock, 10.0)
+        assert feedback["point_sample_count"] == 5 and feedback["mean_points"] == -2
+        assert feedback["recent_points"] == -10 and feedback["search_trials"] == 6
         early = daily.feedback_for(db, identifier, "ridge", target, stamp("2024-01-03", 10), 10.0)
         assert early["sample_count"] == 0 and early["adjustments"]["close"] == 0
+        assert early["point_sample_count"] == 0 and early["search_trials"] == 4
 
 
 def test_previous_best_parameters_seed_future_search():
@@ -412,3 +437,98 @@ def test_repeated_scheduler_handles_two_existing_news_jobs(client, monkeypatch):
     assert first["intelligence_jobs"] == repeated["intelligence_jobs"]
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(Job).where(Job.kind == "intelligence")) == 2
+
+
+def test_points_are_idempotent_revisioned_stock_isolated_and_keep_originals(client, monkeypatch):
+    from backend.app.daily_points import award_points
+
+    identifier, _ = prepared(client, monkeypatch)
+    offsets = {"naive": 0.1, "arima": 0.1, "ridge": 0.02, "sarima": 0.3}
+    monkeypatch.setattr(daily, "model_families", lambda: [{"id": f, "available": True} for f in offsets])
+    clock = stamp("2024-01-04")
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    daily.daily_tick(at=clock)
+    with SessionLocal() as db:
+        batch = db.scalar(select(DailyBatch))
+        base = {"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.5}
+        frozen = {}
+        for task in list(db.scalars(select(DailyTask))):
+            p = freeze_prediction(
+                db, batch, task, clock, {f: v + offsets[task.family] for f, v in base.items()}
+            )
+            frozen[p.id] = copy.deepcopy(p.result)
+
+        def actual(offset):
+            values = [base[f] + offset for f in ["open", "high", "low", "close"]]
+            content = (
+                "date,open,high,low,close,volume\n2024-01-04," + ",".join(map(str, values)) + ",1000\n"
+            ).encode()
+            imported = preview(db, identifier, content, "actual.csv", "1d", "raw", "shares", {})
+            imported.metadata_json = {**imported.metadata_json, "source": {"provider": "Tencent"}}
+            db.commit()
+            commit_import(db, imported.id, "replace")
+
+        actual(0)
+        assert award_points(db, stamp("2024-01-04", 15)) == 0
+        assert daily.settle_daily(db, stamp("2024-01-04", 16)) == 4
+        old_outcomes = {o.id: copy.deepcopy(o.metrics) for o in db.scalars(select(DailyOutcome))}
+        assert award_points(db, stamp("2024-01-04", 16)) == 1
+        assert award_points(db, stamp("2024-01-04", 16)) == 0
+        status = daily.daily_status(db, identifier)
+        assert {e["family"]: e["points"] for e in status["leaderboard"]} == {
+            "ridge": 2,
+            "arima": 0,
+            "naive": 0,
+            "sarima": -2,
+        }
+        other = Stock(code="000002", exchange="SZSE", name="other test")
+        db.add(other)
+        db.commit()
+        assert daily.daily_status(db, other.id)["leaderboard"] == []
+
+        actual(0.3)
+        assert daily.settle_daily(db, stamp("2024-01-04", 16)) == 4
+        assert award_points(db, stamp("2024-01-04", 16)) == 1
+        assert db.scalar(select(func.count()).select_from(DailyPointRound)) == 2
+        status = daily.daily_status(db, identifier)
+        assert all(e["sessions"] == 1 for e in status["leaderboard"])
+        assert {e["family"]: e["points"] for e in status["leaderboard"]} == {
+            "ridge": -2,
+            "arima": 0,
+            "naive": 0,
+            "sarima": 5,
+        }
+        db.expire_all()
+        for key, saved in frozen.items():
+            assert db.get(Prediction, key).result == saved
+        for key, saved in old_outcomes.items():
+            assert db.get(DailyOutcome, key).metrics == saved
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"published_at": "2024-01-04T09:15:00+08:00"},
+        {"data_cutoff": "2024-01-04"},
+        {"target_session": "2024-01-05"},
+    ],
+)
+def test_points_reject_non_prospective_results(client, monkeypatch, change):
+    from backend.app.daily_points import award_points
+
+    identifier, _ = prepared(client, monkeypatch)
+    clock = stamp("2024-01-04")
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    daily.daily_tick(at=clock)
+    with SessionLocal() as db:
+        batch, task = db.scalar(select(DailyBatch)), db.scalar(select(DailyTask))
+        prediction = freeze_prediction(db, batch, task, clock)
+        content = b"date,open,high,low,close,volume\n2024-01-04,10,11,9,10.5,1000\n"
+        imported = preview(db, identifier, content, "actual.csv", "1d", "raw", "shares", {})
+        imported.metadata_json = {**imported.metadata_json, "source": {"provider": "Tencent"}}
+        db.commit()
+        commit_import(db, imported.id, "replace")
+        daily.settle_daily(db, stamp("2024-01-04", 16))
+        prediction.result = {**prediction.result, **change}
+        db.commit()
+        assert award_points(db, stamp("2024-01-04", 16)) == 0

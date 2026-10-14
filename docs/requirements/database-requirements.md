@@ -1,6 +1,6 @@
 # 股票研究辅助系统：数据库需求
 
-版本：0.11｜更新：2026-10-12｜状态：持续实施的逻辑需求；SQLite本机和PostgreSQL迁移均支持
+版本：0.12｜更新：2026-10-14｜状态：持续实施的逻辑需求；SQLite本机和PostgreSQL迁移均支持
 
 配套文件：[前端需求](frontend-requirements.md)、[后端需求](backend-requirements.md)。
 
@@ -144,3 +144,9 @@ point区间满足lower≤upper；OHLC点估计在同一模型和目标日满足�
 未知发布时间保留NULL；来源只提供日期则注明日期精度，不编造时分秒。短摘录和原链接随数据库保存，公开原响应与请求证据进入audits/intelligence并纳入完整备份。所有实体有stock_id或可经batch/task追溯，分页游标不得跨股复用。
 
 本次迁移新增五表，保留全部已有表和记录；具体物理类型以Alembic迁移和实体定义为准。完整方法见[自动盘前预测与情报](../自动盘前预测与情报.md)。
+
+## 2026-10-14补充：奖罚积分轮次
+
+新增daily_point_rounds，引用batch_id、actual_revision_id，保存policy、cohort_checksum、result及创建时间，四者组合唯一。result包含参与task/model/outcome标识、分精度价格/绝对误差、排名MAE、名次、积分和理由。单独追加，不更新原daily_outcomes或predictions。
+
+同一真实修订/参与集合幂等；真实行情或有效参与集合修订时追加轮次，累计按同股每预测日最新一轮计算，避免重复加分。反馈使用创建时间限定可得性，旧训练配置保持冻结。积分表和核对材料随完整备份保存，真实数据不提交GitHub。

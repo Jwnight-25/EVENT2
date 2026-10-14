@@ -230,6 +230,16 @@ class DailyOutcome(Record, Base):
     __table_args__ = (UniqueConstraint("task_id", "actual_revision_id"),)
 
 
+class DailyPointRound(Record, Base):
+    __tablename__ = "daily_point_rounds"
+    batch_id: Mapped[str] = mapped_column(ForeignKey("daily_batches.id"), index=True)
+    actual_revision_id: Mapped[str] = mapped_column(ForeignKey("bar_revisions.id"))
+    policy: Mapped[str] = mapped_column(String(60))
+    cohort_checksum: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict] = mapped_column(JSON)
+    __table_args__ = (UniqueConstraint("batch_id", "actual_revision_id", "policy", "cohort_checksum"),)
+
+
 class IntelligenceItem(Record, Base):
     __tablename__ = "intelligence_items"
     stock_id: Mapped[str] = mapped_column(ForeignKey("stocks.id"), index=True)
