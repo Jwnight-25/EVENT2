@@ -40,6 +40,10 @@ class TrainingRequest(SnapshotRequest):
     evaluation_samples: int = Field(default=128, ge=32, le=512)
     tuning_samples: int = Field(default=96, ge=32, le=256)
     search_profile: Literal["standard", "expanded", "adaptive"] = "adaptive"
+    optimize_structure: bool = True
+    reuse_previous_parameters: bool = True
+    ridge_lags_min: int = Field(default=3, ge=1, le=10)
+    ridge_lags_max: int = Field(default=10, ge=1, le=10)
     ridge_alpha_min: float = Field(default=0.01, gt=0, le=1e6)
     ridge_alpha_max: float = Field(default=100000, gt=0, le=1e6)
     arima_max_order: int = Field(default=2, ge=1, le=3)
@@ -51,6 +55,8 @@ class TrainingRequest(SnapshotRequest):
     def ordered_range(self):
         if self.ridge_alpha_min > self.ridge_alpha_max:
             raise ValueError("Ridge参数下限不能大于上限")
+        if self.ridge_lags_min > self.ridge_lags_max:
+            raise ValueError("Ridge滞后特征下限不能大于上限")
         return self
 
 

@@ -77,6 +77,7 @@ def prepare_deployment(rows, features, model, config, job_id, deadline):
         "refit_interval_bars": 21,
         "artifact_path": path,
         "artifact_checksum": checksum,
+        "structure": artifact["structure"],
         "note": "近期复核来自参数固定、每21交易日重新拟合的历史预测；最新全数据产物没有新的样本外成绩，滚动残差区间为代理校准，不保证未来覆盖",
     }
     return artifact, detail

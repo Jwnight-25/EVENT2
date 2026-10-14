@@ -36,6 +36,10 @@ export function Training({
   const [mode, setMode] = useState("cross_validation");
   const [matchThreshold, setMatchThreshold] = useState(95);
   const [profile, setProfile] = useState("adaptive");
+  const [optimizeStructure, setOptimizeStructure] = useState(true);
+  const [reusePrevious, setReusePrevious] = useState(true);
+  const [lagMin, setLagMin] = useState(3);
+  const [lagMax, setLagMax] = useState(10);
   const [alphaMin, setAlphaMin] = useState(0.01);
   const [alphaMax, setAlphaMax] = useState(100000);
   const [orderLimit, setOrderLimit] = useState(2);
@@ -276,6 +280,10 @@ export function Training({
         evaluation_mode: mode,
         match_threshold: matchThreshold / 100,
         search_profile: profile,
+        optimize_structure: optimizeStructure,
+        reuse_previous_parameters: reusePrevious,
+        ridge_lags_min: lagMin,
+        ridge_lags_max: lagMax,
         ridge_alpha_min: alphaMin,
         ridge_alpha_max: alphaMax,
         arima_max_order: orderLimit,
@@ -374,7 +382,25 @@ export function Training({
           ))}
         </div>
         <details style={{ marginTop: 16 }}>
-          <summary>参数大小与评估设置</summary>
+          <summary>参数数量、大小与评估设置</summary>
+          <div className="check-group" style={{ marginTop: 16 }}>
+            <label>
+              <input
+                type="checkbox"
+                checked={optimizeStructure}
+                onChange={(e) => setOptimizeStructure(e.target.checked)}
+              />
+              同时优化特征数量与网络规模
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={reusePrevious}
+                onChange={(e) => setReusePrevious(e.target.checked)}
+              />
+              参考上次同股同周期的参数作为候选
+            </label>
+          </div>
           <div className="config-grid" style={{ marginTop: 16 }}>
             <label>
               搜索范围
@@ -382,7 +408,7 @@ export function Training({
                 value={profile}
                 onChange={(e) => setProfile(e.target.value)}
               >
-                <option value="adaptive">分阶段搜索 · Ridge自动细化</option>
+                <option value="adaptive">分阶段搜索 · 各模型自动细化</option>
                 <option value="standard">标准网格</option>
                 <option value="expanded">扩展网格</option>
               </select>
@@ -395,6 +421,28 @@ export function Training({
                 max={256}
                 value={tuningSamples}
                 onChange={(e) => setTuningSamples(Number(e.target.value))}
+              />
+            </label>
+            <label>
+              Ridge收益率滞后特征下限
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={lagMin}
+                onChange={(e) => setLagMin(Number(e.target.value))}
+                disabled={!optimizeStructure}
+              />
+            </label>
+            <label>
+              Ridge收益率滞后特征上限
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={lagMax}
+                onChange={(e) => setLagMax(Number(e.target.value))}
+                disabled={!optimizeStructure}
               />
             </label>
             <label>
@@ -443,7 +491,7 @@ export function Training({
             </label>
           </div>
           <p className="section-note">
-            标准Ridge取6个对数间隔值，扩展取12个；分阶段模式先比较6个值，再在最佳参数附近细化，受α上下限约束。SARIMA比较5/20日季节周期。细化连续3次没有0.1%改善、试验数或总时限达到上限即停止；只根据调参区段选择参数。
+            默认联合搜索模型结构和参数值：Ridge比较不同滞后特征数量与α，ARIMA/SARIMA调整阶数及季节项；可选树模型和网络比较叶数、宽度、层数及学习率。分阶段模式为细化保留预算，每类4次可完成粗搜及一次细化；只允许1次时无法比较多个候选。连续3次无0.1%改善、无新候选、试验数或总时限达到上限即停止。模型系数在每次拟合中学习，不直接手动缩放旧权重。
           </p>
         </details>
         <div className="check-group">
@@ -754,6 +802,38 @@ export function Training({
             {pct(current.metrics.nominal_coverage)}。
           </p>
           <EvidenceLabels evidence={current.metrics.reliability} />
+          {current.metrics.structure && (
+            <div className="note-box">
+              <strong>实际拟合的模型规模</strong>
+              <p>
+                拟合参数数量：
+                {current.metrics.structure.predictive_parameter_count ??
+                  "采用树/叶规模统计"}
+                {current.metrics.structure.feature_count != null &&
+                  ` · 输入特征 ${current.metrics.structure.feature_count}个`}
+                {current.metrics.structure.feature_lags != null &&
+                  ` · 收益率滞后 ${current.metrics.structure.feature_lags}个`}
+                {current.metrics.structure.tree_count != null &&
+                  ` · 树 ${current.metrics.structure.tree_count}棵 · 叶输出 ${current.metrics.structure.leaf_output_count}个`}
+              </p>
+              {current.metrics.structure.coefficient_abs_mean != null && (
+                <p>
+                  标准化系数绝对均值：
+                  {current.metrics.structure.coefficient_abs_mean.toExponential(
+                    4,
+                  )}{" "}
+                  · 最大值：
+                  {current.metrics.structure.coefficient_abs_max.toExponential(
+                    4,
+                  )}
+                </p>
+              )}
+              <p className="section-note">
+                {current.metrics.structure.note}
+                。数量与幅度都来自实际拟合产物，不把试验次数当作模型参数数量。
+              </p>
+            </div>
+          )}
           <p className="section-note">
             {current.metrics.reliability?.warnings?.join("；")}。
             {current.metrics.reliability?.rules}
@@ -1104,6 +1184,8 @@ export function Training({
                   <th>周期</th>
                   <th>模型</th>
                   <th>实际参数</th>
+                  <th>搜索阶段</th>
+                  <th>拟合参数数 / 特征数</th>
                   <th>状态</th>
                   <th>验证MAE / 失败原因</th>
                 </tr>
@@ -1114,6 +1196,20 @@ export function Training({
                     <td>{horizons[t.horizon]}</td>
                     <td>{t.family}</td>
                     <td>{JSON.stringify(t.parameters)}</td>
+                    <td>
+                      {(
+                        {
+                          coarse: "粗搜",
+                          refinement: "自适应细化",
+                          exploration: "补充探索",
+                        } as Record<string, string>
+                      )[t.report.search_stage] || "旧记录"}
+                    </td>
+                    <td>
+                      {t.report.structure
+                        ? `${t.report.structure.predictive_parameter_count ?? "树/叶"} / ${t.report.structure.feature_count ?? "—"}`
+                        : "—"}
+                    </td>
                     <td>{t.status === "succeeded" ? "完成" : "失败"}</td>
                     <td>{t.report.error || score(t.report.validation_mae)}</td>
                   </tr>

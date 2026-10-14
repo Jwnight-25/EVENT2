@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import time
 import warnings
 
@@ -25,7 +26,7 @@ from .market import load_snapshot
 from .calendar import future_dates
 
 STEPS = {"next_day": 1, "one_month": 20, "three_months": 60}
-VERSION = "direct-multistep-v4"
+VERSION = "direct-multistep-v5"
 
 
 def relative_improvement(error, baseline):
@@ -182,7 +183,59 @@ def candidates(family, config=None):
         "nhits": [{"input_size": size, "max_steps": count} for size in (60, 120) for count in (100, 200)],
         "patchtst": [{"input_size": size, "max_steps": count} for size in (60, 120) for count in (100, 200)],
     }
+    if config.get("optimize_structure"):
+        lo, hi = config["ridge_lags_min"], config["ridge_lags_max"]
+        lags = list(dict.fromkeys([lo, (lo + hi) // 2, hi]))
+        lower, upper = config["ridge_alpha_min"], config["ridge_alpha_max"]
+        ridge = [
+            {"alpha": float(a), "feature_lags": lag}
+            for a, lag in zip((lower, math.sqrt(lower * upper), upper), (lo, (lo + hi) // 2, hi))
+        ]
+        ridge += [{**p, "feature_lags": lag} for p in grid["ridge"] for lag in lags]
+        grid["ridge"] = ridge
+        grid["sarima"] = [
+            {"order": order, "seasonal_order": seasonal}
+            for order, seasonal in [
+                ([1, 1, 0], [1, 0, 0, 5]),
+                ([0, 1, 1], [0, 0, 1, 20]),
+                ([1, 1, 1], [1, 0, 1, 5]),
+            ]
+        ] + [
+            {**p, "order": order}
+            for order in ([1, 1, 0], [0, 1, 1], [1, 1, 1], [1, 0, 1])
+            for p in grid["sarima"]
+        ]
+        for neural in ("nhits", "patchtst"):
+            grid[neural] = [
+                {
+                    "input_size": size,
+                    "max_steps": steps,
+                    "hidden_size": width,
+                    "hidden_layers": layers,
+                    "learning_rate": rate,
+                }
+                for size, steps, width, layers, rate in (
+                    (60, 100, 16, 1, 0.001),
+                    (120, 200, 32, 2, 0.0005),
+                    (60, 200, 64, 3, 0.003),
+                    (120, 100, 32, 1, 0.001),
+                )
+            ]
     seed = config.get("seed_parameters", {}).get(family)
+    if isinstance(seed, dict) and family == "ridge":
+        if (
+            not config.get("ridge_alpha_min", 0.01)
+            <= seed.get("alpha", 0)
+            <= config.get("ridge_alpha_max", 100000)
+        ):
+            seed = None
+        elif config.get("optimize_structure"):
+            seed = {**seed, "feature_lags": seed.get("feature_lags", 10)}
+            if not config["ridge_lags_min"] <= seed["feature_lags"] <= config["ridge_lags_max"]:
+                seed = None
+    if isinstance(seed, dict) and family in ("arima", "sarima", "garch"):
+        if any(seed.get("order", [0, 0, 0])[i] > limit for i in (0, 2)):
+            seed = None
     choices = ([seed] if isinstance(seed, dict) else []) + grid[family]
     return list({json.dumps(item, sort_keys=True): item for item in choices}.values())
 
@@ -204,9 +257,14 @@ def fit(rows, features, end, horizon, family, parameters, seed):
     if family == "naive":
         artifact["estimator"] = None
     elif family == "ridge":
+        lags = parameters.get("feature_lags", 10)
+        if not isinstance(lags, int) or not 1 <= lags <= 10:
+            raise ValueError("Ridge滞后特征数量必须在1—10之间")
+        columns = [*range(lags), *range(10, features.shape[1])]
         estimator = make_pipeline(StandardScaler(), Ridge(alpha=parameters["alpha"]))
-        estimator.fit(features[indices], targets)
+        estimator.fit(features[indices][:, columns], targets)
         artifact["estimator"] = estimator
+        artifact["feature_indices"] = columns
     elif family == "lightgbm":
         from lightgbm import LGBMRegressor
 
@@ -271,6 +329,7 @@ def fit(rows, features, end, horizon, family, parameters, seed):
             "h": steps,
             "input_size": parameters["input_size"],
             "max_steps": parameters["max_steps"],
+            "learning_rate": parameters.get("learning_rate", 0.001),
             "random_seed": seed,
             "loss": MAE(),
             "accelerator": "cpu",
@@ -279,9 +338,17 @@ def fit(rows, features, end, horizon, family, parameters, seed):
             "logger": False,
         }
         if family == "nhits":
-            settings["mlp_units"] = [[32, 32]] * 3
+            settings["mlp_units"] = [
+                [parameters.get("hidden_size", 32)] * parameters.get("hidden_layers", 2) for _ in range(3)
+            ]
         else:
-            settings.update({"hidden_size": 32, "n_heads": 4, "encoder_layers": 2})
+            settings.update(
+                {
+                    "hidden_size": parameters.get("hidden_size", 32),
+                    "n_heads": 4,
+                    "encoder_layers": parameters.get("hidden_layers", 2),
+                }
+            )
         estimator = NeuralForecast(models=[model_cls(**settings)], freq="D")
         history = pd.DataFrame(
             {
@@ -292,7 +359,51 @@ def fit(rows, features, end, horizon, family, parameters, seed):
         )
         estimator.fit(df=history)
         artifact["estimator"] = estimator
+    artifact["structure"] = fitted_structure(artifact)
     return artifact
+
+
+def fitted_structure(artifact):
+    family, estimator = artifact["family"], artifact["estimator"]
+    result = {"family": family, "predictive_parameter_count": None}
+    if family == "naive":
+        result.update(predictive_parameter_count=0, note="固定比较规则，没有需要搜索的自由参数")
+    elif family == "ridge":
+        fitted = estimator.steps[-1][1]
+        coefficients = np.asarray(fitted.coef_)
+        result.update(
+            predictive_parameter_count=int(coefficients.size + np.asarray(fitted.intercept_).size),
+            feature_count=int(coefficients.shape[-1]),
+            feature_lags=artifact["parameters"].get("feature_lags", 10),
+            coefficient_abs_mean=float(np.abs(coefficients).mean()),
+            coefficient_abs_max=float(np.abs(coefficients).max()),
+            note="预测系数与截距数量；系数幅度按标准化输入计算，不包含缩放器统计量",
+        )
+    elif family in ("arima", "sarima", "garch"):
+        parameters = np.asarray(estimator.params)
+        count = parameters.size
+        if family == "garch":
+            count += len(artifact["volatility"].params)
+        result.update(
+            predictive_parameter_count=int(count),
+            fitted_parameter_values=parameters.tolist(),
+            note="均值模型拟合参数（含方差）；GARCH时数量同时包含波动模型",
+        )
+    elif family == "lightgbm":
+        boosters = [m.booster_ for targets in estimator for m in targets]
+        result.update(
+            tree_count=sum(b.num_trees() for b in boosters),
+            leaf_output_count=sum(t["num_leaves"] for b in boosters for t in b.dump_model()["tree_info"]),
+            note="汇总各目标各分位数的树与叶输出数量，不等同线性系数数量",
+        )
+    else:
+        result.update(
+            predictive_parameter_count=sum(
+                int(p.numel()) for p in estimator.models[0].parameters() if p.requires_grad
+            ),
+            note="实际网络中可训练权重数量",
+        )
+    return result
 
 
 def forecast(artifact, rows, features, origin):
@@ -301,7 +412,10 @@ def forecast(artifact, rows, features, origin):
     if family == "naive":
         return np.r_[0.0, 0.0, artifact["shape"]] if horizon == "next_day" else np.zeros(steps)
     if family == "ridge":
-        return artifact["estimator"].predict(features[origin : origin + 1])[0]
+        selected = features[origin : origin + 1]
+        if "feature_indices" in artifact:
+            selected = selected[:, artifact["feature_indices"]]
+        return artifact["estimator"].predict(selected)[0]
     if family == "lightgbm":
         values = [
             sorted(float(estimator.predict(features[origin : origin + 1])[0]) for estimator in quantiles)
@@ -528,7 +642,7 @@ def nominate_families(family_best, mode):
 def train_job(job_id):
     from .assessment import assess_models, CHECK_LABELS
     from .cross_validation import fold_boundaries, validate_family
-    from .search import refine_ridge, choose_fittable
+    from .search import proposal_stream, choose_fittable
     from .reliability import reliability
 
     with SessionLocal() as db:
@@ -608,31 +722,17 @@ def train_job(job_id):
         exhausted = False
         families = ["naive", *dict.fromkeys(f for f in config["families"] if f != "naive")]
         # Round-robin search ensures a small budget still compares model families.
-        grids = {f: candidates(f, config) for f in families}
-        proposals = [
-            (family, parameters)
-            for index in range(max(len(grids[f]) for f in families))
-            for family in families
-            for parameters in grids[family][index : index + 1]
-        ]
+        search_config = {
+            **config,
+            "seed_parameters": config.get("seed_parameters_by_horizon", {}).get(
+                horizon, config.get("seed_parameters", {})
+            ),
+        }
+        grids = {f: candidates(f, search_config) for f in families}
         family_counts = {f: 0 for f in families}
-
-        def proposal_stream():
-            yield from proposals
-            if config.get("search_profile") == "adaptive" and "ridge" in families:
-                # This stage uses only the two pre-CV tuning windows.
-                stale = 0
-                while family_counts["ridge"] < (config.get("trials_per_family") or config["max_trials"]):
-                    history = search_history.get("ridge", [])
-                    proposal = refine_ridge(history, config["ridge_alpha_min"], config["ridge_alpha_max"])
-                    if proposal is None or stale >= 3:
-                        break
-                    previous = family_best.get("ridge", {}).get("score", float("inf"))
-                    yield "ridge", proposal
-                    current = family_best.get("ridge", {}).get("score", float("inf"))
-                    stale = 0 if current < previous * 0.999 else stale + 1
-
-        for family, parameters in proposal_stream():
+        for family, parameters, search_stage in proposal_stream(
+            families, grids, search_history, family_counts, family_best, search_config
+        ):
             if family != "naive":
                 cap = config.get("trials_per_family")
                 if (cap and family_counts[family] >= cap) or (
@@ -660,7 +760,8 @@ def train_job(job_id):
                 trial_report = {
                     "validation_windows": windows,
                     "validation_mae": score,
-                    "search_stage": "coarse" if parameters in grids[family] else "refinement",
+                    "search_stage": search_stage,
+                    "structure": artifact["structure"],
                 }
                 ranked_candidates.setdefault(family, []).append(
                     {"parameters": parameters, "score": score, "windows": windows}
@@ -675,7 +776,10 @@ def train_job(job_id):
             except Cancelled:
                 raise
             except Exception as exc:
-                status, trial_report = "failed", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+                status, trial_report = (
+                    "failed",
+                    {"error": f"{type(exc).__name__}: {str(exc)[:300]}", "search_stage": search_stage},
+                )
             search_history.setdefault(family, []).append(
                 {"parameters": parameters, "score": score if status == "succeeded" else None}
             )
@@ -772,6 +876,7 @@ def train_job(job_id):
                     "fitted_through": rows[artifact["fit_end"]]["time"],
                     "steps": steps,
                     "fitting_fallbacks": fallbacks,
+                    "structure": artifact["structure"],
                     "search_at_boundary": family == "ridge"
                     and settings["parameters"]["alpha"]
                     in (config["ridge_alpha_min"], config["ridge_alpha_max"]),
@@ -893,10 +998,11 @@ def train_job(job_id):
             "nominees": nominees,
             "trials": trial_count,
             "trials_by_family": family_counts,
-            "search_method": "coarse-grid + bounded Ridge refinement"
+            "search_method": "budget-reserved coarse search + bounded per-family refinement"
             if config.get("search_profile") == "adaptive"
             else "fixed-grid",
             "tuning_samples_per_window": config.get("tuning_samples", 96),
+            "optimize_structure": config.get("optimize_structure", False),
             "stop_rule": "参数试验上限、总时限或细化阶段连续3次无0.1%改善；不根据最终交叉验证反复调参",
             "message": "15%时序交叉验证完成"
             if mode == "cross_validation"

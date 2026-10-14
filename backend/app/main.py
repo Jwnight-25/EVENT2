@@ -340,7 +340,27 @@ def training_create(body: TrainingRequest, db: DB, idempotency_key: str | None =
     job = Job(kind="training", payload={"request": payload}, idempotency_key=idempotency_key)
     db.add(job)
     db.flush()
-    run = TrainingRun(stock_id=body.stock_id, snapshot_id=snap.id, job_id=job.id, config=payload)
+    run_config = dict(payload)
+    if body.reuse_previous_parameters:
+        seeds, seed_ids = {}, {}
+        previous_models = db.scalars(
+            select(Model)
+            .join(Snapshot, Model.snapshot_id == Snapshot.id)
+            .where(
+                Model.stock_id == body.stock_id,
+                Model.price_basis == body.price_basis,
+                Snapshot.cutoff <= snap.cutoff,
+            )
+            .order_by(Model.created_at.desc())
+        )
+        for model in previous_models:
+            if model.family not in body.families or model.horizon not in body.horizons:
+                continue
+            if model.family not in seeds.setdefault(model.horizon, {}):
+                seeds[model.horizon][model.family] = model.parameters
+                seed_ids.setdefault(model.horizon, {})[model.family] = model.id
+        run_config.update(seed_parameters_by_horizon=seeds, seed_model_ids=seed_ids)
+    run = TrainingRun(stock_id=body.stock_id, snapshot_id=snap.id, job_id=job.id, config=run_config)
     db.add(run)
     db.flush()
     job.result = {"run_id": run.id}
