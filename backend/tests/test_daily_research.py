@@ -119,13 +119,140 @@ def freeze_prediction(db, batch, task, clock, candle=None):
 
 def test_schedule_and_initial_prospective_batch(client):
     with SessionLocal() as db:
-        assert daily.target_session(db, stamp("2024-01-04", 6)) is None
+        assert daily.target_session(db, stamp("2024-01-04", 6)) == "2024-01-04"
         assert daily.target_session(db, stamp("2024-01-04", 7)) == "2024-01-04"
         assert daily.target_session(db, stamp("2024-01-04", 10)) is None
-        assert daily.target_session(db, stamp("2024-01-06", 8)) is None
+        assert daily.target_session(db, stamp("2024-01-06", 8)) == "2024-01-08"
+        assert daily.target_session(db, stamp("2024-01-03", 17)) == "2024-01-04"
+        assert daily.target_session(db, datetime.fromisoformat("2024-01-03T15:29:59+08:00")) is None
+        assert daily.target_session(db, datetime.fromisoformat("2024-01-03T15:30:00+08:00")) == "2024-01-04"
+        assert daily.target_session(db, datetime.fromisoformat("2024-01-04T09:15:00+08:00")) is None
+        assert daily.target_session(db, stamp("2024-01-01", 8)) == "2024-01-02"
         assert daily.target_session(db, stamp("2024-01-03", 17), True) == "2024-01-04"
         with pytest.raises(DomainError, match="截止"):
             daily.target_session(db, stamp("2024-01-04", 10), True)
+
+
+def test_evening_preparation_survives_overnight_and_reuses_same_frozen_batch(client, monkeypatch):
+    identifier, cutoff = prepared(client, monkeypatch)
+    clock = stamp("2024-01-03", 17)
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    first = daily.daily_tick()
+    assert first["batches"][0]["session_date"] == "2024-01-04"
+    with SessionLocal() as db:
+        batch = db.scalar(select(DailyBatch))
+        frozen = (batch.id, batch.snapshot_id, copy.deepcopy(batch.config))
+        assert batch.config["data_cutoff"] == cutoff
+    for clock in [stamp("2024-01-04", 0), stamp("2024-01-04", 6), stamp("2024-01-04", 8)]:
+        assert daily.daily_tick()["batches"][0]["status"] == "training"
+    with SessionLocal() as db:
+        batch = db.scalar(select(DailyBatch))
+        assert (batch.id, batch.snapshot_id, batch.config) == frozen
+        assert db.scalar(select(func.count()).select_from(DailyTask)) == 1
+        assert db.scalar(select(func.count()).select_from(Snapshot)) == 1
+
+
+def test_pending_evening_batch_retries_when_pinned_data_arrives(client, monkeypatch):
+    identifier, cutoff = prepared(client, monkeypatch)
+    clock = stamp("2024-01-03", 17)
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    with SessionLocal() as db:
+        db.get(MarketFeed, identifier).last_completed_session = "2024-01-02"
+        db.commit()
+    assert daily.daily_tick()["batches"][0]["status"] == "waiting_data"
+    with SessionLocal() as db:
+        db.get(MarketFeed, identifier).last_completed_session = cutoff
+        db.commit()
+    clock = stamp("2024-01-03", 23)
+    assert daily.daily_tick()["batches"][0]["status"] == "training"
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(DailyBatch)) == 1
+        assert db.scalar(select(func.count()).select_from(DailyTask)) == 1
+
+
+def test_gap_audit_catches_offline_sessions_without_forecasts_scores_or_weekends(client, monkeypatch):
+    identifier, _ = prepared(client, monkeypatch)
+    clock = stamp("2024-01-04")
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    daily.daily_tick()
+    with SessionLocal() as db:
+        original = db.scalar(select(DailyBatch))
+        prediction = freeze_prediction(db, original, db.scalar(select(DailyTask)), clock)
+        frozen = copy.deepcopy(prediction.result)
+        new_stock = Stock(code="000002", exchange="SZSE", name="no monitoring history")
+        db.add(new_stock)
+        content = b"date,open,high,low,close,volume\n2024-01-05,10,11,9,10.5,1000\n"
+        imported = preview(db, identifier, content, "actual.csv", "1d", "raw", "shares", {})
+        imported.metadata_json = {**imported.metadata_json, "source": {"provider": "Tencent"}}
+        db.commit()
+        commit_import(db, imported.id, "replace")
+    clock = stamp("2024-01-09", 10)
+    result = daily.daily_tick()
+    assert result["gaps_recorded"] == 3
+    assert result["scored"] == result["point_rounds"] == 0
+    assert daily.daily_tick()["gaps_recorded"] == 0
+    with SessionLocal() as db:
+        status = daily.daily_status(db, identifier)
+        gaps = [b for b in status["batches"] if b["config"].get("gap_record")]
+        assert {b["session_date"] for b in gaps} == {"2024-01-05", "2024-01-08", "2024-01-09"}
+        assert all(b["status"] == "missed" and b["tasks"] == [] for b in gaps)
+        assert all(b["coverage"]["settlement"] == "no_forecast" for b in gaps)
+        actual = next(b for b in gaps if b["session_date"] == "2024-01-05")["coverage"]
+        assert actual["actual_available"] and actual["actual"]["close"] == 10.5
+        assert daily.daily_status(db, new_stock.id)["batches"] == []
+        assert db.scalar(select(func.count()).select_from(Prediction)) == 1
+        assert db.scalar(select(func.count()).select_from(DailyOutcome)) == 0
+        assert db.get(Prediction, prediction.id).result == frozen
+        # Even an explicit request for a recorded gap cannot enqueue historical work.
+        late = daily._queue_batch(db, db.get(Stock, identifier), "2024-01-05", clock, False)
+        assert late.snapshot_id is None
+        assert db.scalar(select(func.count()).select_from(DailyTask)) == 1
+
+
+def test_waiting_data_expiry_keeps_specific_failure_reason(client, monkeypatch):
+    identifier, _ = prepared(client, monkeypatch)
+    clock = stamp("2024-01-03", 17)
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    with SessionLocal() as db:
+        db.get(MarketFeed, identifier).last_completed_session = "2024-01-02"
+        db.commit()
+    daily.daily_tick()
+    clock = stamp("2024-01-04", 10)
+    daily.daily_tick()
+    with SessionLocal() as db:
+        batch = db.scalar(select(DailyBatch))
+        assert batch.status == "missed"
+        assert batch.config["reason_code"] == "waiting_data_expired"
+        assert "2024-01-03" in batch.error and "截止" in batch.error
+
+
+def test_coverage_only_exposes_closed_actuals_from_pinned_source(client, monkeypatch):
+    identifier, _ = prepared(client, monkeypatch)
+    clock = stamp("2024-01-04")
+    monkeypatch.setattr(daily, "market_time", lambda at=None: at or clock)
+    daily.daily_tick()
+    with SessionLocal() as db:
+        batch = db.scalar(select(DailyBatch))
+        freeze_prediction(db, batch, db.scalar(select(DailyTask)), clock)
+
+        def actual(provider, close):
+            content = f"date,open,high,low,close,volume\n2024-01-04,10,11,9,{close},1000\n".encode()
+            imported = preview(db, identifier, content, "actual.csv", "1d", "raw", "shares", {})
+            imported.metadata_json = {**imported.metadata_json, "source": {"provider": provider}}
+            db.commit()
+            commit_import(db, imported.id, "replace")
+
+        actual("Tencent", 10.5)
+        clock = stamp("2024-01-04", 15)
+        coverage = daily.daily_status(db, identifier)["batches"][0]["coverage"]
+        assert not coverage["actual_available"] and coverage["actual"] is None
+        clock = stamp("2024-01-04", 16)
+        coverage = daily.daily_status(db, identifier)["batches"][0]["coverage"]
+        assert coverage["actual_available"] and coverage["actual"]["close"] == 10.5
+        assert coverage["settlement"] == "settlement_pending"
+        actual("Eastmoney", 10.6)
+        coverage = daily.daily_status(db, identifier)["batches"][0]["coverage"]
+        assert not coverage["actual_available"] and coverage["actual"] is None
 
 
 def test_daily_idempotency_and_current_source_requirement(client, monkeypatch):
@@ -331,6 +458,11 @@ def test_expired_queued_batch_cannot_turn_into_a_backfilled_prediction(client, m
         assert task.status == "missed" and task.prediction_id is None
         assert db.get(Job, task.training_job_id).status == "cancelled"
         assert db.scalar(select(DailyBatch)).status == "missed"
+        job_id = task.training_job_id
+    daily.reconcile_job(job_id)
+    with SessionLocal() as db:
+        assert db.get(DailyTask, task.id).status == "missed"
+        assert db.scalar(select(DailyBatch)).config["reason_code"] == "jobs_expired"
 
 
 def test_real_naive_training_and_prediction_chain_without_manual_generation(client, monkeypatch):

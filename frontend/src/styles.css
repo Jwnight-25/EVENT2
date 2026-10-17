@@ -1308,6 +1308,18 @@ pre {
 .daily-forecast table small {
   white-space: nowrap;
 }
+.daily-coverage {
+  min-width: 0;
+  white-space: normal;
+}
+.daily-coverage th,
+.daily-coverage td {
+  padding: 10px 8px;
+  vertical-align: top;
+}
+.daily-coverage .text-btn {
+  white-space: nowrap;
+}
 .manual-research {
   margin: 20px 0;
 }

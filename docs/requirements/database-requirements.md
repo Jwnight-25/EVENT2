@@ -156,3 +156,5 @@ point区间满足lower≤upper；OHLC点估计在同一模型和目标日满足�
 复用已有JSON实体，无新增表。training_runs.config冻结optimize_structure、复用以前参数选项、Ridge特征上下限及按周期的上次参数/来源模型ID；jobs保持原始请求以保证幂等。optimization_trials.report增加search_stage和structure，记录真实参数数量、特征数/树叶规模及对应误差。models.metrics.structure保存最终规模与系数幅度，预测deployment.structure保存独立最新拟合的规模。
 
 Ridge产物保存feature_indices，完整特征矩阵的原21列定义和顺序不改动；旧产物缺少选列字段时保持原行为。新训练另存权重与哈希，不能修改原实验、积分或预测以适配新规则。
+
+2026-10-17调度补充：复用daily_batches，无新增迁移。每股已有监测历史内的缺失交易日追加status=missed的无快照、无任务记录，config保存gap_record、reason_code与detected_at；不得追溯修改旧预测或补造积分。仍受(stock_id, session_date)唯一约束，重复恢复不重复建档；真实行情和原积分全部保留。

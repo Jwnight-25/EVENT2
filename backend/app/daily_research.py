@@ -1,6 +1,6 @@
 """Prospective daily OHLC forecasts and causal, auditable error feedback."""
 
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import math
 from sqlalchemy import select
 
@@ -29,7 +29,6 @@ from .schemas import TrainingRequest
 from .storage import storage_lock
 
 FIELDS = ("open", "high", "low", "close")
-START = time(7, 0)
 DEADLINE = time(9, 15)
 POLICY = "daily-error-feedback-v1"
 
@@ -39,13 +38,50 @@ def cutoff_time(day):
 
 
 def target_session(db, stamp, bootstrap=False):
-    if bootstrap:
-        target = future_dates(db, latest_closed_session(db, stamp), 1)[0]
-        if stamp >= cutoff_time(target):
+    # Prepare after the preceding close, including nights, weekends and holidays.
+    # During an open session latest_closed_session still points to yesterday;
+    # the deadline check prevents turning today's known prices into a forecast.
+    target = future_dates(db, latest_closed_session(db, stamp), 1)[0]
+    if stamp >= cutoff_time(target):
+        if bootstrap:
             raise DomainError("当前已过盘前截止，等待本次收盘后才能准备下一交易日")
-        return target
-    day = stamp.date().isoformat()
-    return day if START <= stamp.time() < DEADLINE and is_open(db, day) else None
+        return None
+    return target
+
+
+def record_missed_sessions(db, stamp):
+    """Record gaps since monitoring began, without creating forecasts or points."""
+    end = latest_closed_session(db, stamp)
+    today = stamp.date().isoformat()
+    if stamp >= cutoff_time(today) and is_open(db, today):
+        end = today
+    recorded = 0
+    for stock in db.scalars(select(Stock)):
+        existing = set(db.scalars(select(DailyBatch.session_date).where(DailyBatch.stock_id == stock.id)))
+        if not existing:
+            continue  # Do not invent a monitoring history for a newly added stock.
+        day = date.fromisoformat(min(existing))
+        while day.isoformat() <= end:
+            session = day.isoformat()
+            if session not in existing and is_open(db, session):
+                db.add(
+                    DailyBatch(
+                        stock_id=stock.id,
+                        session_date=session,
+                        deadline=cutoff_time(session).isoformat(),
+                        status="missed",
+                        error="盘前截止前未创建自动批次，缺少盘前预测，无法评分；请检查电脑休眠、关机或后台调度记录",
+                        config={
+                            "gap_record": True,
+                            "reason_code": "no_preopen_batch",
+                            "detected_at": stamp.isoformat(),
+                        },
+                    )
+                )
+                recorded += 1
+            day += timedelta(days=1)
+    db.flush()
+    return recorded
 
 
 def feedback_for(db, stock_id, family, target, stamp, reference):
@@ -239,6 +275,8 @@ def reconcile_job(job_id):
             return
         batch = db.scalar(select(DailyBatch).where(DailyBatch.id == task.batch_id).with_for_update())
         job = db.get(Job, job_id)
+        if task.status == "missed":
+            return  # A late completion hook must not erase the recorded cutoff reason.
         if job.status in ("queued", "running"):
             return
         if job.status != "succeeded":
@@ -453,7 +491,11 @@ def daily_tick(at=None, bootstrap=False):
             )
         )
         for batch in expired:
-            batch.status, batch.error = "missed", "错过盘前窗口，保留已有结果，不补造盘前预测"
+            prior_error = batch.error
+            reason = "waiting_data_expired" if batch.status == "waiting_data" else "jobs_expired"
+            batch.config = {**batch.config, "reason_code": reason, "detected_at": stamp.isoformat()}
+            batch.status = "missed"
+            batch.error = (f"{prior_error}；" if prior_error else "") + "错过盘前截止，缺失结果不补造、不计分"
             for task in db.scalars(
                 select(DailyTask).where(
                     DailyTask.batch_id == batch.id, DailyTask.status.in_(["training", "predicting"])
@@ -471,12 +513,14 @@ def daily_tick(at=None, bootstrap=False):
                 batch.status = "partial"
                 batch.error = "部分模型按时保存，其他模型错过盘前截止"
         db.commit()
+        gaps = record_missed_sessions(db, stamp)
+        db.commit()
         # Catch-up actuals must be scored before freezing the next training configuration.
         scored = settle_daily(db, stamp)
         point_rounds = award_points(db, stamp)
         targets = {(s.id, target) for s in db.scalars(select(Stock))} if target else set()
         for batch in db.scalars(select(DailyBatch).where(DailyBatch.status == "waiting_data")):
-            if batch.config.get("bootstrap") and stamp < datetime.fromisoformat(batch.deadline):
+            if stamp < datetime.fromisoformat(batch.deadline):
                 targets.add((batch.stock_id, batch.session_date))
         result = []
         for stock_id, day in sorted(targets):
@@ -503,6 +547,7 @@ def daily_tick(at=None, bootstrap=False):
         "batches": result,
         "scored": scored,
         "point_rounds": point_rounds,
+        "gaps_recorded": gaps,
         "checked_at": stamp.isoformat(),
     }
 
@@ -522,6 +567,8 @@ def daily_status(db, stock_id):
         )
     )
     result = []
+    stamp = market_time()
+    feed = db.get(MarketFeed, stock_id)
     for batch in batches:
         point_round = point_rounds.get(batch.id)
         entries = {e["task_id"]: e for e in point_round.result["entries"]} if point_round else {}
@@ -551,6 +598,25 @@ def daily_status(db, stock_id):
                     "score": entries.get(task.id),
                 }
             )
+        current = db.get(BarCurrent, (stock_id, "1d", "raw", batch.session_date))
+        actual_bar = db.get(BarRevision, current.revision_id) if current else None
+        imported = db.get(ImportBatch, actual_bar.import_id) if actual_bar else None
+        same_source = bool(
+            feed and imported and imported.metadata_json.get("source", {}).get("provider") == feed.provider
+        )
+        actual = {f: float(getattr(actual_bar, f)) for f in FIELDS} if same_source else None
+        closed = stamp >= datetime.combine(date.fromisoformat(batch.session_date), time(15, 30), SHANGHAI)
+        ready = sum(t["status"] == "ready" and bool(t["prediction"]) for t in tasks)
+        if point_round:
+            settlement = "scored"
+        elif not ready and stamp >= cutoff_time(batch.session_date):
+            settlement = "no_forecast"
+        elif not ready or any(t["status"] in ("training", "predicting") for t in tasks):
+            settlement = "preparing"
+        elif closed and actual:
+            settlement = "settlement_pending"
+        else:
+            settlement = "awaiting_actual"
         result.append(
             {
                 "id": batch.id,
@@ -561,11 +627,19 @@ def daily_status(db, stock_id):
                 "config": batch.config,
                 "tasks": tasks,
                 "points_awarded_at": point_round.created_at if point_round else None,
+                "coverage": {
+                    "prediction_count": ready,
+                    "scored_count": len(entries),
+                    "actual": actual if closed else None,
+                    "actual_available": bool(closed and actual),
+                    "settlement": settlement,
+                },
             }
         )
     return {
         "stock_id": stock_id,
-        "schedule": "交易日07:00开始；09:15前冻结预测；15:30后核对真实OHLC",
+        "schedule": "收盘15:30后准备下一交易日，盘前检查；目标日09:15前冻结预测；收盘后评分",
+        "runtime_note": "本机后台需开机、登录且保持唤醒；恢复运行会补齐行情及漏跑记录，缺少盘前预测的日期不计分",
         "policy": POLICY,
         "scoring_rule": RULE,
         "leaderboard": leaderboard(rounds),
