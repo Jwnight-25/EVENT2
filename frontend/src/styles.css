@@ -1320,6 +1320,33 @@ pre {
 .daily-coverage .text-btn {
   white-space: nowrap;
 }
+.daily-deviations {
+  margin-top: 20px;
+}
+.deviation-filters {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: end;
+  margin: 18px 0;
+}
+.deviation-high {
+  color: #b85245;
+}
+.deviation-low {
+  color: #287157;
+}
+.deviation-pagination {
+  margin: 16px 0;
+}
+.deviation-detail {
+  border-top: 1px solid #e3e9dc;
+  padding-top: 12px;
+}
+.deviation-detail > p {
+  font-size: 12px;
+  line-height: 1.8;
+}
 .manual-research {
   margin: 20px 0;
 }

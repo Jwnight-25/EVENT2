@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -710,6 +711,22 @@ def daily_research_status(stock_id: str, db: DB):
     from .daily_research import daily_status
 
     return daily_status(db, stock_id)
+
+
+@app.get(API_PREFIX + "/daily-research/{stock_id}/deviations")
+def daily_deviation_statistics(
+    stock_id: str,
+    db: DB,
+    start: date | None = None,
+    end: date | None = None,
+    family: str | None = Query(None, min_length=1, max_length=40),
+    only_available: bool = True,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from .daily_deviations import daily_deviations
+
+    return daily_deviations(db, stock_id, start, end, family, only_available, limit, offset)
 
 
 @app.get(API_PREFIX + "/intelligence/{stock_id}")

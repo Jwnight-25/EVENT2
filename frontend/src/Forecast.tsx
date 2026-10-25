@@ -1,4 +1,5 @@
 import { DailyForecast } from "./DailyForecast";
+import { DailyDeviations } from "./DailyDeviations";
 import { EvidenceLabels } from "./EvidenceLabels";
 import { useMemo, useState } from "react";
 import { Telescope, ArrowUpRight } from "lucide-react";
@@ -260,6 +261,9 @@ export function Forecast({
           <button className="text-btn" onClick={() => setAISettingsOpen(true)}>
             AI接入设置
           </button>
+          <a className="text-btn" href="#daily-deviations">
+            每日偏差统计
+          </a>
         </div>
       </div>
       {chatOpen && stock && (
@@ -290,6 +294,7 @@ export function Forecast({
           refresh();
         }}
       />
+      <DailyDeviations key={stock?.id} stock={stock} basis={basis} />
       <details
         className="manual-research"
         open={manualOpen}
