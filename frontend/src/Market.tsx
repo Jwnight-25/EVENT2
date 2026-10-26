@@ -36,13 +36,19 @@ export function AddStock({
   added,
 }: {
   close: () => void;
-  added: () => void;
+  added: (id: string) => void;
 }) {
   const [exchange, setExchange] = useState("SSE");
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const { data: knownStocks, error: restoreError } = useLoad(
+    () => api<Stock[]>("/stocks?include_inactive=true"),
+    [],
+  );
+  const archived =
+    knownStocks?.filter((item) => item.is_active === false) || [];
   return (
     <Modal title="添加研究股票" close={close}>
       <form
@@ -50,8 +56,12 @@ export function AddStock({
           e.preventDefault();
           setBusy(true);
           try {
-            await post("/stocks", { exchange, code, name });
-            added();
+            const result = await post<{ id: string }>("/stocks", {
+              exchange,
+              code,
+              name,
+            });
+            added(result.id);
             close();
           } catch (e) {
             setError((e as Error).message);
@@ -96,6 +106,45 @@ export function AddStock({
           添加股票
         </button>
       </form>
+      {restoreError && (
+        <p className="section-note">暂时无法读取已移出列表：{restoreError}</p>
+      )}
+      {archived.length > 0 && (
+        <div className="restore-stocks">
+          <h3>恢复已移出的股票</h3>
+          <p className="section-note">
+            恢复原有行情、模型与积分，并继续后续自动调度。
+          </p>
+          {archived.map((item) => (
+            <div className="row" key={item.id}>
+              <span>
+                {item.name} · {item.code}
+              </span>
+              <button
+                className="secondary"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError("");
+                  try {
+                    const result = await post<{ id: string }>(
+                      `/stocks/${item.id}/restore`,
+                      {},
+                    );
+                    added(result.id);
+                    close();
+                  } catch (e) {
+                    setError((e as Error).message);
+                    setBusy(false);
+                  }
+                }}
+              >
+                恢复关注 {item.name}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </Modal>
   );
 }

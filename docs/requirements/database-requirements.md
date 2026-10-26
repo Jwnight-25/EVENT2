@@ -160,3 +160,5 @@ Ridge产物保存feature_indices，完整特征矩阵的原21列定义和顺序�
 2026-10-17调度补充：复用daily_batches，无新增迁移。每股已有监测历史内的缺失交易日追加status=missed的无快照、无任务记录，config保存gap_record、reason_code与detected_at；不得追溯修改旧预测或补造积分。仍受(stock_id, session_date)唯一约束，重复恢复不重复建档；真实行情和原积分全部保留。
 
 2026-10-25补充：每日偏差统计复用已有批次、模型任务、预测、当前行情修订及固定来源关系，只读联查，不新增迁移或持久化派生表；按(stock_id, session_date, family)既有唯一批次/任务关系避免重复样本。统计返回当前实际修订ID，行情修订不覆盖原预测及原积分审计轮次。
+
+2026-10-26补充：迁移e12a562e8c39为stocks增加is_active（既有股票默认true），新增stock_watch_events记录stock_id、is_active、changed_at及递增ID。删除仅修改关注状态及未启动批次的paused状态，所有行情、模型、积分及其他关联记录保留；移出/恢复事件参与漏跑日期判断，重复操作不重复记事件。

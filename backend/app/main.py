@@ -3,7 +3,7 @@ from datetime import date
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 from uuid import uuid4
-from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,7 +60,7 @@ app = FastAPI(title="EVENT2 · 股票研究", version="0.12.0", lifespan=lifespa
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Idempotency-Key"],
 )
 
@@ -92,7 +92,7 @@ async def request_id(request: Request, call_next):
     owns_storage_lock = request.url.path.startswith(API_PREFIX + "/maintenance/backups") or (
         request.url.path.startswith(API_PREFIX + "/market-updates/") and request.url.path.endswith("/check")
     )
-    if request.method == "POST" and not owns_storage_lock:
+    if request.method in ("POST", "DELETE") and not owns_storage_lock:
         from .storage import storage_lock
 
         try:
@@ -147,9 +147,12 @@ def health(db: DB):
 
 
 @app.get(API_PREFIX + "/stocks")
-def stocks(db: DB):
+def stocks(db: DB, include_inactive: bool = False):
     result = []
-    for stock in db.scalars(select(Stock).order_by(Stock.code)):
+    query = select(Stock).order_by(Stock.code)
+    if not include_inactive:
+        query = query.where(Stock.is_active.is_(True))
+    for stock in db.scalars(query):
         latest = db.scalar(
             select(func.max(BarCurrent.time)).where(
                 BarCurrent.stock_id == stock.id, BarCurrent.interval == "1d"
@@ -163,7 +166,21 @@ def stocks(db: DB):
 
 
 @app.post(API_PREFIX + "/stocks", status_code=201)
-def add_stock(body: StockRequest, db: DB):
+def add_stock(body: StockRequest, db: DB, response: Response):
+    from .advice import serial_write
+    from .stock_watchlist import change_state
+
+    serial_write(db)
+    prior = db.scalar(
+        select(Stock).where(Stock.exchange == body.exchange, Stock.code == body.code).with_for_update()
+    )
+    if prior:
+        if prior.is_active:
+            raise DomainError("该股票已存在", "duplicate_stock", 409)
+        change_state(db, prior, True)
+        db.commit()
+        response.status_code = 200
+        return encode(prior)
     stock = Stock(**body.model_dump())
     db.add(stock)
     try:
@@ -171,6 +188,22 @@ def add_stock(body: StockRequest, db: DB):
     except IntegrityError:
         db.rollback()
         raise DomainError("该股票已存在", "duplicate_stock", 409)
+    return encode(stock)
+
+
+@app.delete(API_PREFIX + "/stocks/{identifier}")
+def remove_stock(identifier: str, db: DB):
+    from .stock_watchlist import set_active
+
+    stock, changed = set_active(db, identifier, False)
+    return {"stock_id": stock.id, "is_active": stock.is_active, "changed": changed, "data_preserved": True}
+
+
+@app.post(API_PREFIX + "/stocks/{identifier}/restore")
+def restore_stock(identifier: str, db: DB):
+    from .stock_watchlist import set_active
+
+    stock, _ = set_active(db, identifier, True)
     return encode(stock)
 
 

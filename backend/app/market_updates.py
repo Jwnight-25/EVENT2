@@ -51,7 +51,7 @@ def latest_closed_session(db, at=None):
 
 def ensure_feeds(db):
     """The first known committed raw import pins the source; never follow later imports."""
-    for stock in db.scalars(select(Stock).order_by(Stock.code)):
+    for stock in db.scalars(select(Stock).where(Stock.is_active.is_(True)).order_by(Stock.code)):
         if db.get(MarketFeed, stock.id):
             continue
         for batch in db.scalars(
@@ -337,13 +337,22 @@ def update_due(stock_id=None, force=False, at=None):
     # Exclusive storage access also protects imports/snapshots and prevents incomplete backups.
     with update_lock(), storage_lock(exclusive=True), SessionLocal() as db:
         if stock_id:
-            require(db.get(Stock, stock_id), "股票不存在")
+            stock = require(db.get(Stock, stock_id), "股票不存在")
+            if not stock.is_active:
+                raise DomainError("该股票已移出关注，请先恢复后再更新", "inactive_stock", 409)
         ensure_feeds(db)
         for run in db.scalars(select(MarketUpdateRun).where(MarketUpdateRun.status == "running")):
             run.status, run.error, run.finished_at = "interrupted", "上次更新进程中断，将重新检查", now()
         db.commit()
         target = latest_closed_session(db, stamp)
-        feeds = list(db.scalars(select(MarketFeed).order_by(MarketFeed.stock_id)))
+        feeds = list(
+            db.scalars(
+                select(MarketFeed)
+                .join(Stock, Stock.id == MarketFeed.stock_id)
+                .where(Stock.is_active.is_(True))
+                .order_by(MarketFeed.stock_id)
+            )
+        )
         if stock_id:
             feeds = [feed for feed in feeds if feed.stock_id == stock_id]
             if not feeds:
@@ -367,7 +376,7 @@ def update_due(stock_id=None, force=False, at=None):
 
 
 def update_status(db, stock_id, at=None):
-    require(db.get(Stock, stock_id), "股票不存在")
+    stock = require(db.get(Stock, stock_id), "股票不存在")
     feed = db.get(MarketFeed, stock_id)
     if not feed:
         return {"configured": False, "message": "待更新服务核验导入来源；未知来源不会自动抓取"}
@@ -396,14 +405,15 @@ def update_status(db, stock_id, at=None):
         calendar_error = exc.message
     return {
         "configured": True,
-        "enabled": feed.enabled,
+        "enabled": feed.enabled and stock.is_active,
+        "watching": stock.is_active,
         "provider": feed.provider,
         "provider_label": PROVIDERS[feed.provider],
         "price_basis": feed.price_basis,
         "schedule": "交易日15:30（北京时间）；后台每5分钟检查，失败间隔15分钟；同股同目标日每天自动最多6次",
         "last_completed_session": feed.last_completed_session,
         "target_session": target,
-        "next_check_at": next_check.isoformat() if next_check else None,
+        "next_check_at": next_check.isoformat() if next_check and stock.is_active else None,
         "calendar_error": calendar_error,
         "runs": [
             {

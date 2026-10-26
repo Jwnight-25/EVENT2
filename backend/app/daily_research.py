@@ -20,6 +20,7 @@ from .entities import (
     BarCurrent,
     BarRevision,
     ImportBatch,
+    StockWatchEvent,
 )
 from .errors import DomainError, require
 from .market import current_bars, create_snapshot, load_snapshot
@@ -56,14 +57,23 @@ def record_missed_sessions(db, stamp):
     if stamp >= cutoff_time(today) and is_open(db, today):
         end = today
     recorded = 0
-    for stock in db.scalars(select(Stock)):
+    from .stock_watchlist import watched_at
+
+    for stock in db.scalars(select(Stock).where(Stock.is_active.is_(True))):
+        events = list(
+            db.scalars(
+                select(StockWatchEvent)
+                .where(StockWatchEvent.stock_id == stock.id)
+                .order_by(StockWatchEvent.changed_at, StockWatchEvent.id)
+            )
+        )
         existing = set(db.scalars(select(DailyBatch.session_date).where(DailyBatch.stock_id == stock.id)))
         if not existing:
             continue  # Do not invent a monitoring history for a newly added stock.
         day = date.fromisoformat(min(existing))
         while day.isoformat() <= end:
             session = day.isoformat()
-            if session not in existing and is_open(db, session):
+            if session not in existing and watched_at(events, cutoff_time(session)) and is_open(db, session):
                 db.add(
                     DailyBatch(
                         stock_id=stock.id,
@@ -198,6 +208,8 @@ def refresh_batch(db, batch):
 
 
 def _queue_batch(db, stock, target, stamp, bootstrap):
+    if not stock.is_active:
+        raise DomainError("该股票已移出关注，未安排新的自动研究", "inactive_stock", 409)
     batch = db.scalar(
         select(DailyBatch).where(DailyBatch.stock_id == stock.id, DailyBatch.session_date == target)
     )
@@ -212,6 +224,8 @@ def _queue_batch(db, stock, target, stamp, bootstrap):
         db.flush()
     if batch.snapshot_id or stamp >= cutoff_time(target):
         return batch
+    if batch.status == "paused":
+        batch.status = "waiting_data"
     previous_day = latest_closed_session(db, datetime.fromisoformat(target).replace(tzinfo=SHANGHAI))
     feed = db.get(MarketFeed, stock.id)
     rows = current_bars(db, stock.id, "1d", "raw")
@@ -518,8 +532,16 @@ def daily_tick(at=None, bootstrap=False):
         # Catch-up actuals must be scored before freezing the next training configuration.
         scored = settle_daily(db, stamp)
         point_rounds = award_points(db, stamp)
-        targets = {(s.id, target) for s in db.scalars(select(Stock))} if target else set()
-        for batch in db.scalars(select(DailyBatch).where(DailyBatch.status == "waiting_data")):
+        targets = (
+            {(s.id, target) for s in db.scalars(select(Stock).where(Stock.is_active.is_(True)))}
+            if target
+            else set()
+        )
+        for batch in db.scalars(
+            select(DailyBatch)
+            .join(Stock, Stock.id == DailyBatch.stock_id)
+            .where(DailyBatch.status == "waiting_data", Stock.is_active.is_(True))
+        ):
             if stamp < datetime.fromisoformat(batch.deadline):
                 targets.add((batch.stock_id, batch.session_date))
         result = []

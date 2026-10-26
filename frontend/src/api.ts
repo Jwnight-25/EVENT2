@@ -5,6 +5,7 @@ export type Stock = {
   exchange: string;
   data_cutoff: string | null;
   intervals: string[];
+  is_active: boolean;
 };
 export type Bar = {
   time: string;

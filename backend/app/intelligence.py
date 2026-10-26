@@ -195,7 +195,9 @@ def enqueue_intelligence(db, stock_id, key=None):
     from .advice import serial_write
 
     serial_write(db)
-    require(db.scalar(select(Stock).where(Stock.id == stock_id).with_for_update()), "股票不存在")
+    stock = require(db.scalar(select(Stock).where(Stock.id == stock_id).with_for_update()), "股票不存在")
+    if not stock.is_active:
+        raise DomainError("该股票已移出关注，请先恢复后再刷新情报", "inactive_stock", 409)
     if key:
         prior = db.scalar(select(Job).where(Job.idempotency_key == key))
         if prior:

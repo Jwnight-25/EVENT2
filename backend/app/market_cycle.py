@@ -27,7 +27,7 @@ def market_cycle(bootstrap=False):
         try:
             with update_lock(), storage_lock(exclusive=True), SessionLocal() as db:
                 ids = []
-                for stock in db.scalars(select(Stock).order_by(Stock.code)):
+                for stock in db.scalars(select(Stock).where(Stock.is_active.is_(True)).order_by(Stock.code)):
                     key = f"intel:{stock.id}:{stamp.date().isoformat()}:{(stamp.hour - 7) // 2}"
                     ids.append(enqueue_intelligence(db, stock.id, key).id)
                 result["intelligence_jobs"] = ids

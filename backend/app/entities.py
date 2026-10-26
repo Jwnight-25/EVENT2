@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, Numeric, String, UniqueConstraint, Index
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, Numeric, String, UniqueConstraint, Index, true
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base, uid, now
 
@@ -13,7 +13,16 @@ class Stock(Record, Base):
     exchange: Mapped[str] = mapped_column(String(4))
     code: Mapped[str] = mapped_column(String(6))
     name: Mapped[str] = mapped_column(String(80))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     __table_args__ = (UniqueConstraint("exchange", "code"),)
+
+
+class StockWatchEvent(Base):
+    __tablename__ = "stock_watch_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_id: Mapped[str] = mapped_column(ForeignKey("stocks.id"), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean)
+    changed_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
 class ImportBatch(Record, Base):

@@ -11,6 +11,7 @@ import {
   CircleHelp,
   ChevronDown,
   Newspaper,
+  Trash2,
 } from "lucide-react";
 import { api, type Stock } from "./api";
 import { useLoad } from "./components";
@@ -20,6 +21,7 @@ import { Forecast } from "./Forecast";
 import { Intelligence } from "./Intelligence";
 import { Maintenance } from "./Maintenance";
 import { CalendarUpload } from "./CalendarUpload";
+import { RemoveStock } from "./RemoveStock";
 
 export default function App() {
   const [maintenanceOpen, setMaintenanceOpen] = useState(false);
@@ -28,13 +30,17 @@ export default function App() {
   const [stockId, setStockId] = useState("");
   const [basis, setBasis] = useState("raw");
   const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState<Stock>();
+  const [immediateStocks, setImmediateStocks] = useState<Stock[]>();
   const [version, setVersion] = useState(0);
   const refresh = () => setVersion((v) => v + 1);
-  const { data: stocks, error } = useLoad(
+  const { data: loadedStocks, error } = useLoad(
     () => api<Stock[]>("/stocks"),
     [version],
     true,
   );
+  useEffect(() => setImmediateStocks(undefined), [loadedStocks]);
+  const stocks = immediateStocks ?? loadedStocks;
   const stock = stocks?.find((s) => s.id === stockId) || stocks?.[0];
   useEffect(() => {
     if (!stocks) return;
@@ -159,6 +165,15 @@ export default function App() {
             >
               <Plus size={17} />
             </button>
+            <button
+              className="icon-btn stock-remove"
+              aria-label="删除当前股票"
+              title="删除当前股票（保留历史数据）"
+              disabled={!stock}
+              onClick={() => stock && setRemoving(stock)}
+            >
+              <Trash2 size={17} />
+            </button>
           </div>
           <div className="topbar-right">
             <select
@@ -222,7 +237,28 @@ export default function App() {
         />
       )}
       {calendarOpen && <CalendarUpload close={() => setCalendarOpen(false)} />}{" "}
-      {adding && <AddStock close={() => setAdding(false)} added={refresh} />}
+      {adding && (
+        <AddStock
+          close={() => setAdding(false)}
+          added={(id) => {
+            setStockId(id);
+            refresh();
+          }}
+        />
+      )}
+      {removing && (
+        <RemoveStock
+          stock={removing}
+          close={() => setRemoving(undefined)}
+          removed={(id) => {
+            const next = (stocks || []).filter((item) => item.id !== id);
+            setImmediateStocks(next);
+            setStockId(next[0]?.id || "");
+            setRemoving(undefined);
+            refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

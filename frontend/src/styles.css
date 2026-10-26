@@ -1347,6 +1347,23 @@ pre {
   font-size: 12px;
   line-height: 1.8;
 }
+.stock-remove {
+  color: #ad6257;
+}
+.secondary.danger {
+  background: #b85245;
+  color: white;
+  border-color: #b85245;
+}
+.restore-stocks {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid #e3e9dc;
+}
+.restore-stocks .row {
+  justify-content: space-between;
+  padding: 8px 0;
+}
 .manual-research {
   margin: 20px 0;
 }

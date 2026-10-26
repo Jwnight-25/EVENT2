@@ -11,6 +11,7 @@ const labels: Record<string, string> = {
   partial: "部分完成",
   failed: "未完成",
   missed: "错过盘前窗口",
+  paused: "已移出关注",
 };
 const fields = [
   ["open", "开盘"],
